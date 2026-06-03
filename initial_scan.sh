@@ -2,12 +2,12 @@
 #SBATCH --job-name=mp_decoder
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
-#SBATCH --time=04:00:00
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4G
-#SBATCH --array=0-11
+#SBATCH --array=0-14
 #SBATCH --output=logs/mp_decoder_%A_%a.out
 #SBATCH --error=logs/mp_decoder_%A_%a.err
 
@@ -15,7 +15,7 @@ module load julia
 
 mkdir -p logs
 
-P_LIST=(0.005 0.010 0.015 0.020)
+P_LIST=(0.011 0.013 0.015 0.017 0.019)
 L_LIST=(7 9 13)
 
 NP=${#P_LIST[@]}
