@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=8G
+#SBATCH --mem=64G
 #SBATCH --array=0-44
 #SBATCH --output=logs/mp_decoder_%A_%a.out
 #SBATCH --error=logs/mp_decoder_%A_%a.err
