@@ -12,6 +12,10 @@
 #SBATCH --error=logs/mp_decoder_%A_%a.err
 
 module load julia
+import Pkg
+Pkg.add("JLD2")
+Pkg.add("Alert")
+PKg.add("ProgressMeter")
 
 mkdir -p logs
 
