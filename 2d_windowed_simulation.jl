@@ -510,21 +510,21 @@ function main()
     * "stats":  get anyon density in the long time steady state
     """
 
-    mode = "Ft" # "trel"
+    mode = get(ENV, "MODE", "trel")
 
-    L = 13
-    logZ = true 
-    Z = logZ ? ceil(Int,log(1.5,L)) : ceil(Int,L/4) # log scaling with L 
-    p = .011
-    qrat = 1       # ratio of measurement errors to physical errors
+    L = parse(Int, get(ENV, "LVAL", "13"))
+    logZ = parse(Bool, get(ENV, "LOGZ", "true"))
+    Z = logZ ? ceil(Int, log(1.5, L)) : ceil(Int, L/4) # log scaling with L 
+    p = parse(Float64, get(ENV, "PVAL", "0.011"))
+    qrat = parse(Float64, get(ENV, "QRAT", "1")) # ratio of measurement errors to physical errors
     vary_L = false # if true, vary system size; if false, use fixed system size and vary p
     vary_Z = false 
 
-    r = 3                     # number of field updates per spin update # poor 
-    synch = true              # synchronous or asynchronous update
-    pretty = (mode == "hist") # makes slightly prettier animations 
-    verbose = true            # controls some printouts
-    out_adj = ""
+    r = parse(Int, get(ENV, "RVAL", "3"))             # number of field updates per spin update # poor 
+    synch = parse(Bool, get(ENV, "SYNCH", "true"))    # synchronous or asynchronous update
+    pretty = mode == "hist"                           # makes slightly prettier animations 
+    verbose = true                                    # controls some printouts
+    out_adj = get(ENV, "OUT_ADJ", "")
 
     params = parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
     Ts = params["Ts"]; samps = params["samps"]; # Ts: total simulation time; samps: number of samples per simulation
@@ -912,7 +912,7 @@ function parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
     end 
 
     if mode == "trel"
-        ps = [0.01, 0.02, 0.03] 
+        ps = [p] 
         nps = length(ps)
 
         samps = 10
@@ -923,14 +923,14 @@ function parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
     end 
 
     if mode == "Ft"
-        ps = [0.01, 0.02, 0.03] 
+        ps = [p] 
         nps = length(ps)
           
         Ts = [L for _ in 1:nps]         
         Ls = [L for _ in 1:nps]
         samps_vec = [1 for _ in 1:nps]
 
-        accu_errors_vec = 1000 #[round(Int, 40 / ((Ls[i]/5)^2)) for i in 1:nps] # professional is with 4000
+        accu_errors_vec = [1000 for i in 1:nps]
         println("number of logical failures to accumulate: ", accu_errors_vec)
     end
 
