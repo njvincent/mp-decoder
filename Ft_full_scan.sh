@@ -2,7 +2,7 @@
 #SBATCH --job-name=mp_decoder
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
-#SBATCH --time=10:00:00
+#SBATCH --time=36:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
@@ -36,4 +36,4 @@ export SYNCH=true
 export LOGZ=true
 export OUT_ADJ="_p${PVAL}_L${LVAL}"
 
-julia 2d_windowed_simulation_batch.jl
+julia 2d_windowed_simulation.jl
