@@ -524,7 +524,8 @@ function main()
     synch = parse(Bool, get(ENV, "SYNCH", "true"))    # synchronous or asynchronous update
     pretty = mode == "hist"                           # makes slightly prettier animations 
     verbose = true                                    # controls some printouts
-    out_adj = get(ENV, "OUT_ADJ", "")
+    repeat_adj = haskey(ENV, "REPEAT_INDEX") ? "_rep$(ENV["REPEAT_INDEX"])" : ""
+    out_adj = get(ENV, "OUT_ADJ", repeat_adj)
 
     params = parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
     Ts = params["Ts"]; samps = params["samps"]; # Ts: total simulation time; samps: number of samples per simulation
@@ -546,6 +547,9 @@ function main()
         println("ps = $ps")
     end 
     println("mode = $mode")
+    if haskey(ENV, "REPEAT_INDEX")
+        println("repeat index = $(ENV["REPEAT_INDEX"])")
+    end
     println("field update speed = $r")
     println("")
 
