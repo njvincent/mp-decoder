@@ -919,7 +919,7 @@ function parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
         ps = [p] 
         nps = length(ps)
 
-        samps = 10
+        samps = 1000
         samps_vec = [samps for _ in 1:nps]
         
         Ts = [1 for _ in 1:nps]
