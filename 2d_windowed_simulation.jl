@@ -744,7 +744,7 @@ function main()
                 maxT = 50000000
                 max_decode_time = 4L # maximum time allowed for offline decoding
                 max_trel = 0 
-                decode_interval = 10 # offline decoding every decode_interval steps
+                decode_interval = 2 # offline decoding every decode_interval steps
 
                 @showprogress dt=1 desc="sampling..." for samp in 1:samps 
                     # reset everything
