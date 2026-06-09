@@ -9,6 +9,7 @@ using JLD2
 using Alert
 using ProgressMeter
 using Dates
+using Base.Threads
 
 function circle_distance(i,j,L)
     """
@@ -510,21 +511,23 @@ function main()
     * "stats":  get anyon density in the long time steady state
     """
 
-    mode = "Ft" # "trel"
+    mode = get(ENV, "MODE", "trel")
 
-    L = 13
-    logZ = true 
-    Z = logZ ? ceil(Int,log(1.5,L)) : ceil(Int,L/4) # log scaling with L 
-    p = .011
-    qrat = 1       # ratio of measurement errors to physical errors
+    L = parse(Int, get(ENV, "LVAL", "13"))
+    logZ = parse(Bool, get(ENV, "LOGZ", "true"))
+    Z = logZ ? ceil(Int, log(1.5, L)) : ceil(Int, L/4) # log scaling with L
+    p = parse(Float64, get(ENV, "PVAL", "0.011"))
+    qrat = parse(Float64, get(ENV, "QRAT", "1")) # ratio of measurement errors to physical errors
     vary_L = false # if true, vary system size; if false, use fixed system size and vary p
     vary_Z = false 
 
-    r = 3                     # number of field updates per spin update # poor 
-    synch = true              # synchronous or asynchronous update
-    pretty = (mode == "hist") # makes slightly prettier animations 
-    verbose = true            # controls some printouts
-    out_adj = ""
+    r = parse(Int, get(ENV, "RVAL", "3"))             # number of field updates per spin update # poor
+    synch = parse(Bool, get(ENV, "SYNCH", "true"))    # synchronous or asynchronous update
+    pretty = mode == "hist"                           # makes slightly prettier animations
+    verbose = true                                    # controls some printouts
+    trial_parallel = parse(Bool, get(ENV, "TRIAL_PARALLEL", "true"))
+    repeat_adj = haskey(ENV, "REPEAT_INDEX") ? "_rep$(ENV["REPEAT_INDEX"])" : ""
+    out_adj = get(ENV, "OUT_ADJ", repeat_adj)
 
     params = parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
     Ts = params["Ts"]; samps = params["samps"]; # Ts: total simulation time; samps: number of samples per simulation
@@ -546,6 +549,10 @@ function main()
         println("ps = $ps")
     end 
     println("mode = $mode")
+    if haskey(ENV, "REPEAT_INDEX")
+        println("repeat index = $(ENV["REPEAT_INDEX"])")
+    end
+    println("trial parallelism = $(trial_parallel && nthreads() > 1) ($(nthreads()) Julia threads)")
     println("field update speed = $r")
     println("")
 
@@ -610,42 +617,56 @@ function main()
             thisL = Ls[pind]
             thisZ = Zs[pind]
 
-            # initialize stuff 
-            fields = zeros(Int,thisL,thisL,thisZ,3,2); new_fields = zeros(Int,thisL,thisL,thisZ,3,2)
-            state_correction = falses(thisL,thisL,2); hist = falses(thisL,thisL,thisZ); hist_correction = falses(thisL,thisL,thisZ,3); old_synds = falses(thisL,thisL); new_synds = falses(thisL,thisL) 
-        
             max_erode_time = thisL^2 
             println("L = $thisL, p = $thisp")
-            longest_erosion = 0 
-            logical_failures = 0 
-            trials = 0 
-            while logical_failures < accu_errors # sample until a certain number of logical errors are created
-                state, old_synds = init_2d(thisp,thisL,"rand","periodic") # random initial state with noise of strength p (assume p is small enough so that logical state has zero holonomies)
-                fields .= 0; hist .= false; new_synds .= false; hist_correction .= false; state_correction .= false # reset everything
-                t = 0
-                while t < max_erode_time  
-                    update!(state,state_correction,old_synds,new_synds,hist,hist_correction,fields,new_fields,r,0,0,synch,pretty)
-                    t += 1 
-                    if ~any(hist) #stop once the syndrome-history array contains no defects
-                        break 
-                    end 
-                end 
-                if t == max_erode_time 
-                    println("max erosion time reached! $t") 
-                end 
-                trials += 1 
-                corrected_state = state .⊻ state_correction
-                if t < max_erode_time @assert sum(get_synds(corrected_state)) == 0 "syndromes not cleaned up: $(get_synds(corrected_state))" end  # check that syndromes are cleaned up
-                # detect_logical_error is called even if the copied decoded state still has nonzero syndrome/anyons
-                logical_error = 1-detect_logical_error(state .⊻ state_correction) # 0 only if both cycles have trivial winding 
 
-                logical_failures += logical_error
+            function run_erode_trials(target_errors)
+                fields = zeros(Int,thisL,thisL,thisZ,3,2); new_fields = zeros(Int,thisL,thisL,thisZ,3,2)
+                state_correction = falses(thisL,thisL,2); hist = falses(thisL,thisL,thisZ); hist_correction = falses(thisL,thisL,thisZ,3); new_synds = falses(thisL,thisL)
+                local_failures = 0
+                local_trials = 0
+                local_tsum = 0.0
+                local_t2sum = 0.0
+                local_max_t = 0
+                while local_failures < target_errors # sample until this worker sees its assigned failures
+                    state, old_synds = init_2d(thisp,thisL,"rand","periodic") # random initial state with noise of strength p
+                    fields .= 0; hist .= false; new_synds .= false; hist_correction .= false; state_correction .= false
+                    t = 0
+                    while t < max_erode_time
+                        update!(state,state_correction,old_synds,new_synds,hist,hist_correction,fields,new_fields,r,0,0,synch,pretty)
+                        t += 1
+                        if ~any(hist) # stop once the syndrome-history array contains no defects
+                            break
+                        end
+                    end
+                    if t == max_erode_time
+                        println("max erosion time reached! $t")
+                    end
+                    local_trials += 1
+                    local_max_t = max(local_max_t, t)
+                    local_tsum += t
+                    local_t2sum += t^2
 
-                if t > longest_erosion longest_erosion = t end
+                    corrected_state = state .⊻ state_correction
+                    if t < max_erode_time @assert sum(get_synds(corrected_state)) == 0 "syndromes not cleaned up: $(get_synds(corrected_state))" end  # check that syndromes are cleaned up
+                    logical_error = 1-detect_logical_error(corrected_state) # 0 only if both cycles have trivial winding
+                    local_failures += logical_error
+                end
+                return local_failures, local_trials, local_tsum, local_t2sum, local_max_t
+            end
 
-                data["erode_times"][pind] += t 
-                data["erode_stats"][pind,2] += t^2 
-            end 
+            worker_count = trial_parallel ? min(nthreads(), accu_errors) : 1
+            worker_results = Vector{Tuple{Int,Int,Float64,Float64,Int}}(undef, worker_count)
+            @threads for worker in 1:worker_count
+                target_errors = accu_errors ÷ worker_count + (worker <= accu_errors % worker_count ? 1 : 0)
+                worker_results[worker] = run_erode_trials(target_errors)
+            end
+
+            logical_failures = sum(result[1] for result in worker_results)
+            trials = sum(result[2] for result in worker_results)
+            longest_erosion = maximum(result[5] for result in worker_results)
+            data["erode_times"][pind] = sum(result[3] for result in worker_results)
+            data["erode_stats"][pind,2] = sum(result[4] for result in worker_results)
             data["erode_frac"][pind] = logical_failures / trials # average over trials
             data["erode_times"][pind] /= trials # average over trials
             data["erode_stats"][pind,1] = data["erode_times"][pind] # redundant of course
@@ -739,42 +760,63 @@ function main()
                 mc_data["trel_stats"] = zeros(3) # mean, std, max of relaxation times
                 maxT = 50000000
                 max_decode_time = 4L # maximum time allowed for offline decoding
-                max_trel = 0 
                 decode_interval = 10 # offline decoding every decode_interval steps
 
-                @showprogress dt=1 desc="sampling..." for samp in 1:samps 
-                    # reset everything
-                    state .= false; state_correction .= false; old_synds .= false; new_synds .= false 
-                    hist .= false; hist_correction .= false; fields .= 0
+                function run_trel_samples(worker, worker_count)
+                    local_hist = falses(L,L,Z); local_hist_correction = falses(L,L,Z,3); local_state = falses(L,L,2); local_state_correction = falses(L,L,2)
+                    local_fields = zeros(Int,L,L,Z,3,2); local_new_fields = zeros(Int,L,L,Z,3,2)
+                    local_old_synds = falses(L,L); local_new_synds = falses(L,L)
+                    local_dhist = falses(L,L,Z); local_dstate = falses(L,L,2); local_dstate_correction = falses(L,L,2); local_dfields = zeros(Int,L,L,Z,3,2)
+                    local_dold_synds = falses(L,L); local_dnew_synds = falses(L,L); local_corrected_dstate = falses(L,L,2)
+                    tsum = 0.0
+                    t2sum = 0.0
+                    max_trel = 0
 
-                    t = 1 
-                    while t < maxT
-                        update!(state,state_correction,old_synds,new_synds,hist,hist_correction,fields,new_fields,r,p,q,synch,pretty)
+                    for samp in worker:worker_count:samps
+                        local_state .= false; local_state_correction .= false; local_old_synds .= false; local_new_synds .= false
+                        local_hist .= false; local_hist_correction .= false; local_fields .= 0
 
-                        if t%decode_interval == 0 # offline decoding on a copy at every decode_interval steps 
-                            dhist .= hist; dfields .= fields; dstate .= state; dstate_correction .= state_correction; dnew_synds .= new_synds; dold_synds .= old_synds
+                        t = 1
+                        while t < maxT
+                            update!(local_state,local_state_correction,local_old_synds,local_new_synds,local_hist,local_hist_correction,local_fields,local_new_fields,r,p,q,synch,pretty)
 
-                            tdec = 0 # time spent decoding
-                            while tdec < max_decode_time && any(dhist)
-                                update!(dstate,dstate_correction,dold_synds,dnew_synds,dhist,hist_correction,dfields,new_fields,r,0,0,true,pretty)
-                                tdec += 1
-                            end 
-                            corrected_dstate .= dstate_correction .⊻ dstate
-                            if any(get_synds(corrected_dstate)) println("decoded state is not logical!, $(tdec/max_decode_time)") end 
-                            # detect_logical_error is called even if the copied decoded state still has nonzero syndrome/anyons
-                            logical_error = 1-detect_logical_error(corrected_dstate) # 0 only if both cycles have trivial winding
-                            if logical_error == 1 break end 
-                        end 
-                        t += 1 
+                            if t%decode_interval == 0 # offline decoding on a copy at every decode_interval steps
+                                local_dhist .= local_hist; local_dfields .= local_fields; local_dstate .= local_state; local_dstate_correction .= local_state_correction; local_dnew_synds .= local_new_synds; local_dold_synds .= local_old_synds
+
+                                tdec = 0 # time spent decoding
+                                while tdec < max_decode_time && any(local_dhist)
+                                    update!(local_dstate,local_dstate_correction,local_dold_synds,local_dnew_synds,local_dhist,local_hist_correction,local_dfields,local_new_fields,r,0,0,true,pretty)
+                                    tdec += 1
+                                end
+                                local_corrected_dstate .= local_dstate_correction .⊻ local_dstate
+                                if any(get_synds(local_corrected_dstate)) println("decoded state is not logical!, $(tdec/max_decode_time)") end
+                                logical_error = 1-detect_logical_error(local_corrected_dstate) # 0 only if both cycles have trivial winding
+                                if logical_error == 1 break end
+                            end
+                            t += 1
+                        end
+                        if t == maxT
+                            println("maxT reached! (sample = $samp)")
+                        end
+                        tsum += t
+                        t2sum += t^2
+                        max_trel = max(max_trel, t)
                     end
-                    if t == maxT 
-                        println("maxT reached! (sample = $samp)")
-                    end
-                    mc_data["trels"] += t / samps 
-                    if t > max_trel max_trel = t end
-                    mc_data["trel_stats"][1] += t / samps
-                    mc_data["trel_stats"][2] += t^2 / samps
-                end 
+                    return tsum, t2sum, max_trel
+                end
+
+                worker_count = trial_parallel ? min(nthreads(), samps) : 1
+                worker_results = Vector{Tuple{Float64,Float64,Int}}(undef, worker_count)
+                @threads for worker in 1:worker_count
+                    worker_results[worker] = run_trel_samples(worker, worker_count)
+                end
+
+                trel_sum = sum(result[1] for result in worker_results)
+                trel2_sum = sum(result[2] for result in worker_results)
+                max_trel = maximum(result[3] for result in worker_results)
+                mc_data["trels"] = trel_sum / samps
+                mc_data["trel_stats"][1] = mc_data["trels"]
+                mc_data["trel_stats"][2] = trel2_sum / samps
                 mc_data["trel_stats"][2] = sqrt(mc_data["trel_stats"][2] - mc_data["trel_stats"][1]^2)
                 mc_data["trel_stats"][3] = max_trel
             end 
@@ -782,36 +824,53 @@ function main()
             if mode == "Ft"
                 println("T = $T")
                 println("accu errors = $acc_err")
-                logical_failures = 0 
-                trials = 0 
-                while logical_failures < acc_err # sample until a certain number of logical errors are created
-                    if verbose && trials % 10000 == 0
-                        println("trial: ", trials)
-                    end
-                    hist .= false; fields .= 0; state .= false; state_correction .= false; old_synds .= false; new_synds .= false
 
-                    for _ in 1:T 
-                        update!(state,state_correction,old_synds,new_synds,hist,hist_correction,fields,new_fields,r,p,q,synch,pretty)
-                    end 
-                    cleanup_time = 2T 
-                    for _ in 1:cleanup_time # finish up by running some (synchronous) ideal decoding to get rid of anyons that remain at positive RG times 
-                        update!(state,state_correction,old_synds,new_synds,hist,hist_correction,fields,new_fields,r,0,0,true,pretty)
-                        if ~any(hist) # if we are in a logical state  
-                            break 
+                function run_Ft_trials(target_errors)
+                    local_hist = falses(L,L,Z); local_hist_correction = falses(L,L,Z,3); local_state = falses(L,L,2); local_state_correction = falses(L,L,2)
+                    local_fields = zeros(Int,L,L,Z,3,2); local_new_fields = zeros(Int,L,L,Z,3,2)
+                    local_old_synds = falses(L,L); local_new_synds = falses(L,L)
+                    local_failures = 0
+                    local_trials = 0
+
+                    while local_failures < target_errors # sample until this worker sees its assigned failures
+                        if verbose && local_trials % 10000 == 0
+                            println("thread $(threadid()) trial: ", local_trials)
                         end
-                    end 
-                    decoded_state = state .⊻ state_correction
-                    if ~any(hist) 
-                        @assert ~any(get_synds(decoded_state)) "decoded state is not logical!" # check that syndromes are cleaned up
-                    else 
-                        if verbose println("anyons not cleaned up!") end 
-                    end 
-                    # detect_logical_error is called even if the copied decoded state still has nonzero syndrome/anyons
-                    logical_failure = 1-detect_logical_error(decoded_state) # 0 only if both cycles have trivial winding
-                    logical_failures += logical_failure
-                    trials += 1
-                    if verbose if logical_failure == 1 println("$(logical_failures / acc_err)") end end # progress report 
-                end 
+                        local_hist .= false; local_fields .= 0; local_state .= false; local_state_correction .= false; local_old_synds .= false; local_new_synds .= false
+
+                        for _ in 1:T
+                            update!(local_state,local_state_correction,local_old_synds,local_new_synds,local_hist,local_hist_correction,local_fields,local_new_fields,r,p,q,synch,pretty)
+                        end
+                        cleanup_time = 2T
+                        for _ in 1:cleanup_time # finish up by running some (synchronous) ideal decoding to get rid of anyons that remain at positive RG times
+                            update!(local_state,local_state_correction,local_old_synds,local_new_synds,local_hist,local_hist_correction,local_fields,local_new_fields,r,0,0,true,pretty)
+                            if ~any(local_hist) # if we are in a logical state
+                                break
+                            end
+                        end
+                        decoded_state = local_state .⊻ local_state_correction
+                        if ~any(local_hist)
+                            @assert ~any(get_synds(decoded_state)) "decoded state is not logical!" # check that syndromes are cleaned up
+                        else
+                            if verbose println("anyons not cleaned up!") end
+                        end
+                        logical_failure = 1-detect_logical_error(decoded_state) # 0 only if both cycles have trivial winding
+                        local_failures += logical_failure
+                        local_trials += 1
+                        if verbose && logical_failure == 1 println("thread $(threadid()) progress: $(local_failures / target_errors)") end
+                    end
+                    return local_failures, local_trials
+                end
+
+                worker_count = trial_parallel ? min(nthreads(), acc_err) : 1
+                worker_results = Vector{Tuple{Int,Int}}(undef, worker_count)
+                @threads for worker in 1:worker_count
+                    target_errors = acc_err ÷ worker_count + (worker <= acc_err % worker_count ? 1 : 0)
+                    worker_results[worker] = run_Ft_trials(target_errors)
+                end
+
+                logical_failures = sum(result[1] for result in worker_results)
+                trials = sum(result[2] for result in worker_results)
                 mc_data["Ft"] = 1-logical_failures/trials # decoding fidelity
                 mc_data["trials"] = trials # number of trials
             end
@@ -912,10 +971,10 @@ function parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
     end 
 
     if mode == "trel"
-        ps = [0.01, 0.02, 0.03] 
+        ps = [p]
         nps = length(ps)
 
-        samps = 10
+        samps = 1000
         samps_vec = [samps for _ in 1:nps]
         
         Ts = [1 for _ in 1:nps]
@@ -923,14 +982,14 @@ function parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
     end 
 
     if mode == "Ft"
-        ps = [0.01, 0.02, 0.03] 
+        ps = [p]
         nps = length(ps)
           
         Ts = [L for _ in 1:nps]         
         Ls = [L for _ in 1:nps]
         samps_vec = [1 for _ in 1:nps]
 
-        accu_errors_vec = 1000 #[round(Int, 40 / ((Ls[i]/5)^2)) for i in 1:nps] # professional is with 4000
+        accu_errors_vec = [1000 for i in 1:nps]
         println("number of logical failures to accumulate: ", accu_errors_vec)
     end
 
