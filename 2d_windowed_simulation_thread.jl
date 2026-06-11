@@ -760,7 +760,7 @@ function main()
                 mc_data["trel_stats"] = zeros(3) # mean, std, max of relaxation times
                 maxT = 50000000
                 max_decode_time = 4L # maximum time allowed for offline decoding
-                decode_interval = 10 # offline decoding every decode_interval steps
+                decode_interval = 2 # offline decoding every decode_interval steps
 
                 function run_trel_samples(worker, worker_count)
                     local_hist = falses(L,L,Z); local_hist_correction = falses(L,L,Z,3); local_state = falses(L,L,2); local_state_correction = falses(L,L,2)
