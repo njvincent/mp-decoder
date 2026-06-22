@@ -700,6 +700,391 @@ function estimate_primitive_cnot_Ft(L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_
     )
 end
 
+function js_string(s)
+    out = replace(string(s), "\\" => "\\\\")
+    out = replace(out, "\"" => "\\\"")
+    out = replace(out, "\n" => "\\n")
+    return "\"$out\""
+end
+
+function bool_entries_js(a)
+    entries = String[]
+    for I in CartesianIndices(a)
+        if a[I]
+            push!(entries, "[" * join(Tuple(I), ",") * "]")
+        end
+    end
+    return "[" * join(entries, ",") * "]"
+end
+
+function hist_entries_js(hist)
+    L,_,Z = size(hist)
+    entries = String[]
+    for i in 1:L, j in 1:L
+        count = 0
+        for k in 1:Z
+            count += hist[i,j,k] ? 1 : 0
+        end
+        if count > 0
+            push!(entries, "[$i,$j,$count]")
+        end
+    end
+    return "[" * join(entries, ",") * "]"
+end
+
+function field_entries_js(fields)
+    L,_,Z,_,_ = size(fields)
+    entries = String[]
+    for i in 1:L, j in 1:L
+        min_field = typemax(Int)
+        for k in 1:Z, a in 1:3, s in 1:2
+            val = fields[i,j,k,a,s]
+            if val > 0
+                min_field = min(min_field,val)
+            end
+        end
+        if min_field < typemax(Int)
+            push!(entries, "[$i,$j,$min_field]")
+        end
+    end
+    return "[" * join(entries, ",") * "]"
+end
+
+function cnot_demo_block_js(state,state_correction,hist,fields)
+    decoded_state = state .⊻ state_correction
+    synds = get_synds(decoded_state)
+    logical_status = (any(synds) || any(hist)) ? "pending" : (detect_logical_error(decoded_state) ? "OK" : "FAIL")
+    return "{" *
+        "\"physical\":$(bool_entries_js(state))," *
+        "\"correction\":$(bool_entries_js(state_correction))," *
+        "\"decoded\":$(bool_entries_js(decoded_state))," *
+        "\"syndromes\":$(bool_entries_js(synds))," *
+        "\"logical_status\":$(js_string(logical_status))," *
+        "\"hist\":$(hist_entries_js(hist))," *
+        "\"fields\":$(field_entries_js(fields))" *
+        "}"
+end
+
+function write_cnot_demo_html(frames_js,L,Z,p,q,r,synch,T_PRE,T_POST,CLEANUP_TIME,fout)
+    html = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Primitive CNOT X-sector demo</title>
+<style>
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1f2933; background: #f6f8fa; }
+main { max-width: 1180px; margin: 0 auto; padding: 20px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.note { color: #5b6775; margin: 0 0 14px; line-height: 1.4; }
+.controls { display: flex; gap: 10px; align-items: center; margin: 14px 0; flex-wrap: wrap; }
+button { padding: 6px 10px; border: 1px solid #b7c0cc; border-radius: 6px; background: white; cursor: pointer; }
+input[type="range"] { flex: 1 1 340px; }
+.panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.panel { background: white; border: 1px solid #d8dee4; border-radius: 8px; padding: 12px; }
+.panel h2 { font-size: 16px; margin: 0 0 8px; }
+canvas { width: 100%; height: auto; border: 1px solid #d8dee4; border-radius: 6px; background: #fbfcfe; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; color: #52606d; }
+.swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.meta { font-size: 13px; color: #52606d; margin-top: 8px; }
+@media (max-width: 860px) { .panels { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+<h1>Primitive CNOT X-sector Demo</h1>
+<p class="note">Bookkeeping view of the primitive baseline. At the CNOT frame, the control block is unchanged and the target block receives target xor control; target fields are merged by nonzero-min.</p>
+<div id="frameLabel" class="meta"></div>
+<div class="controls">
+<button id="prev">Prev</button>
+<button id="play">Play</button>
+<button id="next">Next</button>
+<input id="slider" type="range" min="0" max="0" value="0">
+</div>
+<div class="panels">
+<section class="panel"><h2>Control</h2><canvas id="control" width="560" height="560"></canvas><div id="controlMeta" class="meta"></div></section>
+<section class="panel"><h2>Target</h2><canvas id="target" width="560" height="560"></canvas><div id="targetMeta" class="meta"></div></section>
+</div>
+<div class="legend">
+<span><span class="swatch" style="background:#e67e22"></span>physical X</span>
+<span><span class="swatch" style="background:#2d7ff9"></span>state correction</span>
+<span><span class="swatch" style="background:#111827"></span>decoded residual</span>
+<span><span class="swatch" style="background:#d62828; border-radius:50%"></span>decoded syndrome</span>
+<span><span class="swatch" style="background:#7b2cbf"></span>history count</span>
+<span><span class="swatch" style="background:#2a9d8f"></span>field site</span>
+</div>
+<p class="meta">L=$L, Z=$Z, p=$p, q=$q, r=$r, synch=$synch, T_PRE=$T_PRE, T_POST=$T_POST, CLEANUP_TIME=$CLEANUP_TIME</p>
+</main>
+<script>
+const L = $L;
+const frames = $frames_js;
+const WIDTH = 560;
+const MARGIN = 48;
+const SCALE = (WIDTH - 2 * MARGIN) / Math.max(L - 1, 1);
+const slider = document.getElementById("slider");
+const label = document.getElementById("frameLabel");
+const playButton = document.getElementById("play");
+let index = 0;
+let timer = null;
+slider.max = Math.max(frames.length - 1, 0);
+
+function pt(i, j) {
+  return [MARGIN + (i - 1) * SCALE, MARGIN + (j - 1) * SCALE];
+}
+
+function edgeEndpoints(edge) {
+  const i = edge[0], j = edge[1], o = edge[2];
+  const a = pt(i, j);
+  if (o === 1) return [a[0], a[1], MARGIN + (i % L) * SCALE, a[1]];
+  return [a[0], a[1], a[0], MARGIN + (j % L) * SCALE];
+}
+
+function drawEdges(ctx, edges, color, width, offset) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  for (const edge of edges) {
+    let [x1, y1, x2, y2] = edgeEndpoints(edge);
+    if (edge[2] === 1) { y1 += offset; y2 += offset; }
+    else { x1 += offset; x2 += offset; }
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawBlock(canvasId, metaId, block) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#fbfcfe";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.strokeStyle = "#d9e2ec";
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= L; i++) {
+    let [x1, y1] = pt(i, 1), [x2, y2] = pt(i, L);
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  for (let j = 1; j <= L; j++) {
+    let [x1, y1] = pt(1, j), [x2, y2] = pt(L, j);
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+
+  for (const f of block.fields) {
+    const [x, y] = pt(f[0], f[1]);
+    const alpha = Math.max(0.12, Math.min(0.45, 0.55 / Math.max(f[2], 1)));
+    ctx.fillStyle = "rgba(42, 157, 143, " + alpha + ")";
+    ctx.fillRect(x - 13, y - 13, 26, 26);
+  }
+
+  drawEdges(ctx, block.physical, "#e67e22", 7, -5);
+  drawEdges(ctx, block.correction, "#2d7ff9", 5, 5);
+  drawEdges(ctx, block.decoded, "#111827", 3, 0);
+
+  for (const h of block.hist) {
+    const [x, y] = pt(h[0], h[1]);
+    ctx.fillStyle = "rgba(123, 44, 191, 0.72)";
+    ctx.fillRect(x - 9, y - 9, 18, 18);
+    ctx.fillStyle = "white";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(h[2]), x, y);
+  }
+  ctx.textAlign = "start";
+  ctx.textBaseline = "alphabetic";
+
+  for (const s of block.syndromes) {
+    const [x, y] = pt(s[0], s[1]);
+    ctx.fillStyle = "#d62828";
+    ctx.beginPath();
+    ctx.arc(x, y, 7, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = "#627d98";
+  for (let i = 1; i <= L; i++) {
+    for (let j = 1; j <= L; j++) {
+      const [x, y] = pt(i, j);
+      ctx.beginPath();
+      ctx.arc(x, y, 2.2, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+  }
+
+  document.getElementById(metaId).textContent =
+    "physical: " + block.physical.length +
+    " | correction: " + block.correction.length +
+    " | residual: " + block.decoded.length +
+    " | syndromes: " + block.syndromes.length +
+    " | logical: " + block.logical_status +
+    " | history sites: " + block.hist.length +
+    " | field sites: " + block.fields.length;
+}
+
+function render() {
+  const f = frames[index];
+  slider.value = index;
+  label.textContent = "frame " + (index + 1) + " / " + frames.length + ": " + f.label;
+  drawBlock("control", "controlMeta", f.control);
+  drawBlock("target", "targetMeta", f.target);
+}
+
+function stop() {
+  if (timer !== null) clearInterval(timer);
+  timer = null;
+  playButton.textContent = "Play";
+}
+
+document.getElementById("prev").onclick = () => { stop(); index = Math.max(0, index - 1); render(); };
+document.getElementById("next").onclick = () => { stop(); index = Math.min(frames.length - 1, index + 1); render(); };
+slider.oninput = () => { stop(); index = Number(slider.value); render(); };
+playButton.onclick = () => {
+  if (timer !== null) { stop(); return; }
+  playButton.textContent = "Pause";
+  timer = setInterval(() => {
+    index = (index + 1) % frames.length;
+    render();
+  }, 650);
+};
+render();
+</script>
+</body>
+</html>
+"""
+    open(fout, "w") do io
+        print(io, html)
+    end
+    return fout
+end
+
+function run_cnot_demo(L,Z,p,q,r,synch,T_PRE,T_POST,CLEANUP_TIME,out_adj)
+    if L < 4
+        error("CNOT_DEMO expects L >= 4 so the seeded pattern is visible.")
+    end
+
+    Random.seed!(parse(Int, get(ENV, "DEMO_SEED", "7")))
+    pretty = false
+    hist_frames_c = Vector{Array{Bool,3}}()
+    hist_frames_t = Vector{Array{Bool,3}}()
+    field_frames_c = Vector{Array{Int,5}}()
+    field_frames_t = Vector{Array{Int,5}}()
+    html_frames = String[]
+
+    hist_c = falses(L,L,Z); hist_correction_c = falses(L,L,Z,3)
+    state_c = falses(L,L,2); state_correction_c = falses(L,L,2)
+    fields_c = zeros(Int,L,L,Z,3,2); new_fields_c = zeros(Int,L,L,Z,3,2)
+    old_synds_c = falses(L,L); new_synds_c = falses(L,L)
+
+    hist_t = falses(L,L,Z); hist_correction_t = falses(L,L,Z,3)
+    state_t = falses(L,L,2); state_correction_t = falses(L,L,2)
+    fields_t = zeros(Int,L,L,Z,3,2); new_fields_t = zeros(Int,L,L,Z,3,2)
+    old_synds_t = falses(L,L); new_synds_t = falses(L,L)
+
+    demo_seed_errors = parse(Int, get(ENV, "DEMO_SEED_ERRORS", string(L)))
+    demo_style = get(ENV, "DEMO_STYLE", "complex")
+
+    if demo_style == "simple"
+        state_c[2,2,1] = true
+        state_c[3,2,1] = true
+        state_t[2,4,2] = true
+    elseif demo_style == "complex"
+        for _ in 1:demo_seed_errors
+            state_c[rand(1:L),rand(1:L),rand(1:2)] ⊻= true
+            state_t[rand(1:L),rand(1:L),rand(1:2)] ⊻= true
+        end
+    else
+        error("DEMO_STYLE must be \"simple\" or \"complex\".")
+    end
+
+    function add_frame!(label)
+        push!(hist_frames_c, copy(hist_c))
+        push!(hist_frames_t, copy(hist_t))
+        push!(field_frames_c, copy(fields_c))
+        push!(field_frames_t, copy(fields_t))
+        push!(html_frames, "{" *
+            "\"label\":$(js_string(label))," *
+            "\"control\":$(cnot_demo_block_js(state_c,state_correction_c,hist_c,fields_c))," *
+            "\"target\":$(cnot_demo_block_js(state_t,state_correction_t,hist_t,fields_t))" *
+            "}")
+    end
+
+    add_frame!("seeded initial state")
+
+    for t in 1:T_PRE
+        update_two_blocks!(
+            state_c,state_correction_c,old_synds_c,new_synds_c,hist_c,hist_correction_c,fields_c,new_fields_c,
+            state_t,state_correction_t,old_synds_t,new_synds_t,hist_t,hist_correction_t,fields_t,new_fields_t,
+            r,p,q,synch,pretty)
+        add_frame!("pre round $t")
+    end
+
+    add_frame!("immediately before primitive CNOT")
+    primitive_cnot_x_sector!(
+        state_c,state_correction_c,old_synds_c,new_synds_c,hist_c,fields_c,new_fields_c,
+        state_t,state_correction_t,old_synds_t,new_synds_t,hist_t,fields_t,new_fields_t)
+    hist_correction_c .= false
+    hist_correction_t .= false
+    add_frame!("after primitive CNOT: target = target xor control")
+
+    for t in 1:T_POST
+        update_two_blocks!(
+            state_c,state_correction_c,old_synds_c,new_synds_c,hist_c,hist_correction_c,fields_c,new_fields_c,
+            state_t,state_correction_t,old_synds_t,new_synds_t,hist_t,hist_correction_t,fields_t,new_fields_t,
+            r,p,q,synch,pretty)
+        add_frame!("post round $t")
+    end
+
+    for t in 1:CLEANUP_TIME
+        update_two_blocks!(
+            state_c,state_correction_c,old_synds_c,new_synds_c,hist_c,hist_correction_c,fields_c,new_fields_c,
+            state_t,state_correction_t,old_synds_t,new_synds_t,hist_t,hist_correction_t,fields_t,new_fields_t,
+            r,0,0,true,pretty)
+        add_frame!("ideal cleanup round $t")
+        if !any(hist_c) && !any(hist_t)
+            break
+        end
+    end
+
+    qadj = q == 0 ? "" : "_q$(round(q,sigdigits=3))"
+    padj = "_p$(round(p,sigdigits=3))"
+    sadj = ~synch ? "_asynch" : ""
+    style_adj = demo_style == "simple" ? "_simple" : "_complex"
+    base = "2d_CNOT_primitive_demo$style_adj$padj$qadj" * "_L$(L)_Z$(Z)$sadj$out_adj"
+
+    function write_block_history(block_name,hist_frames,field_frames)
+        T = length(hist_frames)
+        # Store hist as a plain numeric array, not a Julia BitArray. JLD2 saves
+        # BitArray with internal chunk metadata that h5py cannot read directly.
+        hist_out = zeros(UInt8,T,L,L,Z)
+        field_hist_out = zeros(Int,T,L,L,Z,3,2)
+        for t in 1:T
+            hist_out[t,:,:,:] .= UInt8.(hist_frames[t])
+            field_hist_out[t,:,:,:,:,:] .= field_frames[t]
+        end
+
+        fout = "$(base)_$(block_name).jld2"
+        jldsave(
+            fout;
+            hist=hist_out,
+            field_hist=field_hist_out,
+            L=L,
+            Z=Z
+        )
+        return fout
+    end
+
+    control_file = write_block_history("control",hist_frames_c,field_frames_c)
+    target_file = write_block_history("target",hist_frames_t,field_frames_t)
+    html_file = "$(base).html"
+    write_cnot_demo_html("[" * join(html_frames, ",") * "]",L,Z,p,q,r,synch,T_PRE,T_POST,CLEANUP_TIME,html_file)
+    return html_file, control_file, target_file
+end
+
 function run_cnot_sanity_checks(L,Z,r,T_PRE,T_POST,CLEANUP_TIME)
     """
     Lightweight checks for the primitive CNOT bookkeeping.
@@ -767,16 +1152,17 @@ function main()
     * "trel":   compute relaxation time/memory lifetime for online decoding 
     * "Ft":     get decoding fidelity (error rate after a fixed number of noisy decoding rounds) for online decoding     
     * "CNOT_Ft": primitive two-block CNOT fixed-time fidelity test
+    * "CNOT_DEMO": write side-by-side HTML plus optional control/target histories
     * "CNOT_DEBUG": run small primitive CNOT sanity checks
     * "stats":  get anyon density in the long time steady state
     """
 
     mode = get(ENV, "MODE", "CNOT_Ft")
 
-    L = parse(Int, get(ENV, "LVAL", "13"))
+    L = parse(Int, get(ENV, "LVAL", mode == "CNOT_DEMO" ? "9" : "13"))
     logZ = parse(Bool, get(ENV, "LOGZ", "true"))
     Z = logZ ? ceil(Int, log(1.5, L)) : ceil(Int, L/4) # log scaling with L
-    p = parse(Float64, get(ENV, "PVAL", "0.011"))
+    p = parse(Float64, get(ENV, "PVAL", mode == "CNOT_DEMO" ? "0.015" : "0.011"))
     qrat = parse(Float64, get(ENV, "QRAT", "1")) # ratio of measurement errors to physical errors
     vary_L = false # if true, vary system size; if false, use fixed system size and vary p
     vary_Z = false 
@@ -788,15 +1174,15 @@ function main()
     trial_parallel = parse(Bool, get(ENV, "TRIAL_PARALLEL", "true"))
     repeat_adj = haskey(ENV, "REPEAT_INDEX") ? "_rep$(ENV["REPEAT_INDEX"])" : ""
     out_adj = get(ENV, "OUT_ADJ", repeat_adj)
-    T_PRE = parse(Int, get(ENV, "T_PRE", string(L)))
-    T_POST = parse(Int, get(ENV, "T_POST", string(L)))
+    T_PRE = parse(Int, get(ENV, "T_PRE", mode == "CNOT_DEMO" ? "6" : string(L)))
+    T_POST = parse(Int, get(ENV, "T_POST", mode == "CNOT_DEMO" ? "6" : string(L)))
     CLEANUP_TIME = parse(Int, get(ENV, "CLEANUP_TIME", string(2*(T_PRE + T_POST))))
     CNOT_STYLE = get(ENV, "CNOT_STYLE", "primitive")
     cnot_acc_errors_env = haskey(ENV, "ACC_ERRORS") ? parse(Int, ENV["ACC_ERRORS"]) : nothing
     cnot_samps_env = haskey(ENV, "SAMPS") ? parse(Int, ENV["SAMPS"]) : 0
 
     params = parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
-    if mode == "CNOT_Ft" || mode == "CNOT_DEBUG"
+    if mode == "CNOT_Ft" || mode == "CNOT_DEMO" || mode == "CNOT_DEBUG"
         if cnot_acc_errors_env !== nothing
             params["accu_errors"] = cnot_acc_errors_env
             params["accu_errors_vec"] = [cnot_acc_errors_env]
@@ -814,7 +1200,7 @@ function main()
     Ls = params["Ls"]; Zs = params["Zs"];       # system size L and Z to be tested
     accu_errors = params["accu_errors"]; accu_errors_vec = params["accu_errors_vec"] # stop simulation if logical error count reaches accu_errors
 
-    data_keys = ["Ft" "CNOT_Ft" "CNOT_fail_rate" "trials" "logical_failures" "control_logical_failures" "target_logical_failures" "both_logical_failures" "cleanup_failures"] ∪ ["hist" "field_hist" "state_hist"] ∪ ["trels" "trel_stats"] ∪ ["erode_times" "erode_stats"] ∪ ["Ms" "binds" "chis" "anyon_densities"] ∪ ["tpreps" "quenched_anyon_densities" "dectest_times" "tprep_errors"]
+    data_keys = ["Ft" "CNOT_Ft" "CNOT_fail_rate" "trials" "logical_failures" "control_logical_failures" "target_logical_failures" "both_logical_failures" "cleanup_failures" "demo_files" "demo_visualizer_commands"] ∪ ["hist" "field_hist" "state_hist"] ∪ ["trels" "trel_stats"] ∪ ["erode_times" "erode_stats"] ∪ ["Ms" "binds" "chis" "anyon_densities"] ∪ ["tpreps" "quenched_anyon_densities" "dectest_times" "tprep_errors"]
     data = Dict{String, Any}(key => 0 for key in data_keys)  # dictionary whose keys are the strings in data_keys and whose initial values are all 0
 
     println("details of simulation: ")
@@ -833,10 +1219,14 @@ function main()
     end
     println("trial parallelism = $(trial_parallel && nthreads() > 1) ($(nthreads()) Julia threads)")
     println("field update speed = $r")
-    if mode == "CNOT_Ft" || mode == "CNOT_DEBUG"
+    if mode == "CNOT_Ft" || mode == "CNOT_DEMO" || mode == "CNOT_DEBUG"
         println("CNOT style = $CNOT_STYLE")
         println("T_PRE = $T_PRE, T_POST = $T_POST, CLEANUP_TIME = $CLEANUP_TIME")
-        if cnot_samps_env > 0
+        if mode == "CNOT_DEMO"
+            println("demo seed = $(get(ENV, "DEMO_SEED", "7"))")
+            println("demo style = $(get(ENV, "DEMO_STYLE", "complex"))")
+            println("demo seeded random errors per block = $(get(ENV, "DEMO_SEED_ERRORS", string(L)))")
+        elseif cnot_samps_env > 0
             println("fixed CNOT samples = $cnot_samps_env")
         else
             println("CNOT failures to accumulate = $(accu_errors_vec[1])")
@@ -848,7 +1238,24 @@ function main()
     old_synds = falses(L,L); new_synds = falses(L,L) 
 
     ### primitive CNOT fixed-time fidelity test ###
-    if mode == "CNOT_Ft"
+    if mode == "CNOT_DEMO"
+        if CNOT_STYLE != "primitive"
+            error("Only CNOT_STYLE=\"primitive\" is implemented in this first-version CNOT simulator.")
+        end
+        println("writing primitive CNOT demo visualization...")
+        html_demo_file, control_demo_file, target_demo_file = run_cnot_demo(L,Z,p,p*qrat,r,synch,T_PRE,T_POST,CLEANUP_TIME,out_adj)
+        data["demo_files"] = [html_demo_file,control_demo_file,target_demo_file]
+        data["demo_visualizer_commands"] = [
+            "python3 2d_windowed_history_visualizer.py -fin $control_demo_file",
+            "python3 2d_windowed_history_visualizer.py -fin $target_demo_file",
+        ]
+        println("open HTML demo: $html_demo_file")
+        println("demo history written to: $control_demo_file")
+        println("demo history written to: $target_demo_file")
+        println("visualize control with: $(data["demo_visualizer_commands"][1])")
+        println("visualize target with: $(data["demo_visualizer_commands"][2])")
+
+    elseif mode == "CNOT_Ft"
         if CNOT_STYLE != "primitive"
             error("Only CNOT_STYLE=\"primitive\" is implemented in this first-version CNOT simulator.")
         end
@@ -1238,6 +1645,8 @@ function main()
     logzadj = logZ ? "_logZ" : ""
     if mode == "CNOT_Ft"
         fout = "2d_CNOT_$(CNOT_STYLE)_Ft$qadj$padj$Ladj$zadj$sadj$logzadj$out_adj.txt"
+    elseif mode == "CNOT_DEMO"
+        fout = "2d_CNOT_$(CNOT_STYLE)_demo$qadj$padj$Ladj$zadj$sadj$logzadj$out_adj.txt"
     else
         fout = "2d_$mode$qadj$padj$Ladj$zadj$sadj$logzadj$out_adj.txt"
     end
@@ -1309,6 +1718,17 @@ function parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
 
         accu_errors_vec = [1000 for i in 1:nps]
         println("number of primitive CNOT failures to accumulate: ", accu_errors_vec)
+    end
+
+    if mode == "CNOT_DEMO"
+        ps = [p]
+        nps = length(ps)
+
+        Ts = [L for _ in 1:nps]
+        Ls = [L for _ in 1:nps]
+        samps_vec = [1 for _ in 1:nps]
+
+        accu_errors_vec = [1 for _ in 1:nps]
     end
 
     if mode == "CNOT_DEBUG"
