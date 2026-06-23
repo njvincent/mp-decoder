@@ -17,6 +17,19 @@ using Base.Threads
 # a minimal two-block control/target experiment. It is not a physically
 # complete labeled-defect CNOT decoder; it only applies the X-sector rule
 # c_out = c, t_out = c xor t to the tracked decoder arrays.
+# 
+# Modifications:
+# 1. Both the control and the target first update T rounds before the CNOT 
+#    gate, and they update another T rounds before a 2T rounds of cleanup.
+# 2. The update rule for CNOT is that 
+#    a. state, state_correction, old_synds, new_synds, and hist of the control 
+#       are unchanged, but the target are XORed with the control.
+#    b. fields of the control is unchanged. fields of the target takes the 
+#       non-zero-min of control and target.
+#    c. new_fields for both the control and the target are set to zero.
+# 3. A trial is counted as failure if either the control or the target has a 
+#    logical failure after the cleanup.
+
 
 function circle_distance(i,j,L)
     """
