@@ -929,194 +929,98 @@ function cnot_demo_block_js(state,state_correction,hist,fields)
         "}"
 end
 
+function int_entries_js(xs)
+    return "[" * join(xs, ",") * "]"
+end
+
+function block_label(block)
+    return block == CONTROL_BLOCK ? "control" : "target"
+end
+
+function merged_demo_block_js(sheets,block,L)
+    decoded_state = merged_decoded_state(sheets,block,L)
+    synds = get_synds(decoded_state)
+    block_sheets = [sheet for sheet in sheets if sheet.block == block]
+    active_count = count(sheet_active, block_sheets)
+    hist_count = count(sheet -> any(sheet.hist), block_sheets)
+    logical_status = (hist_count > 0 || any(synds)) ? "pending" : (detect_logical_error(decoded_state) ? "OK" : "FAIL")
+    lineage_ids = [sheet.lineage_id for sheet in block_sheets]
+    return "{" *
+        "\"physical\":[]," *
+        "\"correction\":[]," *
+        "\"decoded\":$(bool_entries_js(decoded_state))," *
+        "\"syndromes\":$(bool_entries_js(synds))," *
+        "\"logical_status\":$(js_string(logical_status))," *
+        "\"hist\":[]," *
+        "\"fields\":[]," *
+        "\"sheet_count\":$(length(block_sheets))," *
+        "\"active_sheet_count\":$active_count," *
+        "\"hist_sheet_count\":$hist_count," *
+        "\"lineages\":$(int_entries_js(lineage_ids))" *
+        "}"
+end
+
+function sheet_summary_js(sheet::DecoderSheet)
+    decoded_state = sheet.state_component .⊻ sheet.state_correction
+    return "{" *
+        "\"lineage_id\":$(sheet.lineage_id)," *
+        "\"block\":$(sheet.block)," *
+        "\"block_label\":$(js_string(block_label(sheet.block)))," *
+        "\"parent_lineage_id\":$(sheet.parent_lineage_id === nothing ? "null" : string(sheet.parent_lineage_id))," *
+        "\"created_by_gate\":$(sheet.created_by_gate === nothing ? "null" : string(sheet.created_by_gate))," *
+        "\"active\":$(sheet_active(sheet) ? "true" : "false")," *
+        "\"physical_count\":$(count(sheet.state_component))," *
+        "\"correction_count\":$(count(sheet.state_correction))," *
+        "\"decoded_count\":$(count(decoded_state))," *
+        "\"hist_count\":$(count(sheet.hist))," *
+        "\"field_count\":$(count(!iszero, sheet.fields))" *
+        "}"
+end
+
+function sheet_demo_js(sheet::DecoderSheet)
+    return "{" *
+        "\"summary\":$(sheet_summary_js(sheet))," *
+        "\"block\":$(cnot_demo_block_js(sheet.state_component,sheet.state_correction,sheet.hist,sheet.fields))" *
+        "}"
+end
+
+function cnot_demo_frame_js(label,sheets,L)
+    sorted_sheets = sort(collect(sheets), by = sheet -> sheet.lineage_id)
+    return "{" *
+        "\"label\":$(js_string(label))," *
+        "\"sheet_count\":$(length(sheets))," *
+        "\"active_sheet_count\":$(count_active_sheets(sheets))," *
+        "\"control\":$(merged_demo_block_js(sheets,CONTROL_BLOCK,L))," *
+        "\"target\":$(merged_demo_block_js(sheets,TARGET_BLOCK,L))," *
+        "\"sheets\":[" * join([sheet_demo_js(sheet) for sheet in sorted_sheets], ",") * "]" *
+        "}"
+end
+
 function write_cnot_demo_html(frames_js,L,Z,p,q,r,synch,T_PRE,T_POST,CLEANUP_TIME,fout)
+    visualizer_file = "2d_cnot_sheetcopy_visualizer.js"
     html = """
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Primitive CNOT X-sector demo</title>
-<style>
-body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1f2933; background: #f6f8fa; }
-main { max-width: 1180px; margin: 0 auto; padding: 20px; }
-h1 { font-size: 22px; margin: 0 0 4px; }
-.note { color: #5b6775; margin: 0 0 14px; line-height: 1.4; }
-.controls { display: flex; gap: 10px; align-items: center; margin: 14px 0; flex-wrap: wrap; }
-button { padding: 6px 10px; border: 1px solid #b7c0cc; border-radius: 6px; background: white; cursor: pointer; }
-input[type="range"] { flex: 1 1 340px; }
-.panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.panel { background: white; border: 1px solid #d8dee4; border-radius: 8px; padding: 12px; }
-.panel h2 { font-size: 16px; margin: 0 0 8px; }
-canvas { width: 100%; height: auto; border: 1px solid #d8dee4; border-radius: 6px; background: #fbfcfe; }
-.legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; color: #52606d; }
-.swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
-.meta { font-size: 13px; color: #52606d; margin-top: 8px; }
-@media (max-width: 860px) { .panels { grid-template-columns: 1fr; } }
-</style>
+<title>Sheet-copy CNOT X-sector demo</title>
 </head>
 <body>
-<main>
-<h1>Primitive CNOT X-sector Demo</h1>
-<p class="note">Bookkeeping view of the primitive baseline. At the CNOT frame, the control block is unchanged and the target block receives target xor control; target fields are merged by nonzero-min.</p>
-<div id="frameLabel" class="meta"></div>
-<div class="controls">
-<button id="prev">Prev</button>
-<button id="play">Play</button>
-<button id="next">Next</button>
-<input id="slider" type="range" min="0" max="0" value="0">
-</div>
-<div class="panels">
-<section class="panel"><h2>Control</h2><canvas id="control" width="560" height="560"></canvas><div id="controlMeta" class="meta"></div></section>
-<section class="panel"><h2>Target</h2><canvas id="target" width="560" height="560"></canvas><div id="targetMeta" class="meta"></div></section>
-</div>
-<div class="legend">
-<span><span class="swatch" style="background:#e67e22"></span>physical X</span>
-<span><span class="swatch" style="background:#2d7ff9"></span>state correction</span>
-<span><span class="swatch" style="background:#111827"></span>decoded residual</span>
-<span><span class="swatch" style="background:#d62828; border-radius:50%"></span>decoded syndrome</span>
-<span><span class="swatch" style="background:#7b2cbf"></span>history count</span>
-<span><span class="swatch" style="background:#2a9d8f"></span>field site</span>
-</div>
-<p class="meta">L=$L, Z=$Z, p=$p, q=$q, r=$r, synch=$synch, T=$(T_PRE + T_POST), T_PRE=$T_PRE, T_POST=$T_POST, CLEANUP_TIME=$CLEANUP_TIME</p>
-</main>
 <script>
-const L = $L;
-const frames = $frames_js;
-const WIDTH = 560;
-const MARGIN = 48;
-const SCALE = (WIDTH - 2 * MARGIN) / Math.max(L - 1, 1);
-const slider = document.getElementById("slider");
-const label = document.getElementById("frameLabel");
-const playButton = document.getElementById("play");
-let index = 0;
-let timer = null;
-slider.max = Math.max(frames.length - 1, 0);
-
-function pt(i, j) {
-  return [MARGIN + (i - 1) * SCALE, MARGIN + (j - 1) * SCALE];
-}
-
-function edgeEndpoints(edge) {
-  const i = edge[0], j = edge[1], o = edge[2];
-  const a = pt(i, j);
-  if (o === 1) return [a[0], a[1], MARGIN + (i % L) * SCALE, a[1]];
-  return [a[0], a[1], a[0], MARGIN + (j % L) * SCALE];
-}
-
-function drawEdges(ctx, edges, color, width, offset) {
-  ctx.save();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.lineCap = "round";
-  for (const edge of edges) {
-    let [x1, y1, x2, y2] = edgeEndpoints(edge);
-    if (edge[2] === 1) { y1 += offset; y2 += offset; }
-    else { x1 += offset; x2 += offset; }
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function drawBlock(canvasId, metaId, block) {
-  const canvas = document.getElementById(canvasId);
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#fbfcfe";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  ctx.strokeStyle = "#d9e2ec";
-  ctx.lineWidth = 1;
-  for (let i = 1; i <= L; i++) {
-    let [x1, y1] = pt(i, 1), [x2, y2] = pt(i, L);
-    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-  }
-  for (let j = 1; j <= L; j++) {
-    let [x1, y1] = pt(1, j), [x2, y2] = pt(L, j);
-    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-  }
-
-  for (const f of block.fields) {
-    const [x, y] = pt(f[0], f[1]);
-    const alpha = Math.max(0.12, Math.min(0.45, 0.55 / Math.max(f[2], 1)));
-    ctx.fillStyle = "rgba(42, 157, 143, " + alpha + ")";
-    ctx.fillRect(x - 13, y - 13, 26, 26);
-  }
-
-  drawEdges(ctx, block.physical, "#e67e22", 7, -5);
-  drawEdges(ctx, block.correction, "#2d7ff9", 5, 5);
-  drawEdges(ctx, block.decoded, "#111827", 3, 0);
-
-  for (const h of block.hist) {
-    const [x, y] = pt(h[0], h[1]);
-    ctx.fillStyle = "rgba(123, 44, 191, 0.72)";
-    ctx.fillRect(x - 9, y - 9, 18, 18);
-    ctx.fillStyle = "white";
-    ctx.font = "12px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(String(h[2]), x, y);
-  }
-  ctx.textAlign = "start";
-  ctx.textBaseline = "alphabetic";
-
-  for (const s of block.syndromes) {
-    const [x, y] = pt(s[0], s[1]);
-    ctx.fillStyle = "#d62828";
-    ctx.beginPath();
-    ctx.arc(x, y, 7, 0, 2 * Math.PI);
-    ctx.fill();
-  }
-
-  ctx.fillStyle = "#627d98";
-  for (let i = 1; i <= L; i++) {
-    for (let j = 1; j <= L; j++) {
-      const [x, y] = pt(i, j);
-      ctx.beginPath();
-      ctx.arc(x, y, 2.2, 0, 2 * Math.PI);
-      ctx.fill();
-    }
-  }
-
-  document.getElementById(metaId).textContent =
-    "physical: " + block.physical.length +
-    " | correction: " + block.correction.length +
-    " | residual: " + block.decoded.length +
-    " | syndromes: " + block.syndromes.length +
-    " | logical: " + block.logical_status +
-    " | history sites: " + block.hist.length +
-    " | field sites: " + block.fields.length;
-}
-
-function render() {
-  const f = frames[index];
-  slider.value = index;
-  label.textContent = "frame " + (index + 1) + " / " + frames.length + ": " + f.label;
-  drawBlock("control", "controlMeta", f.control);
-  drawBlock("target", "targetMeta", f.target);
-}
-
-function stop() {
-  if (timer !== null) clearInterval(timer);
-  timer = null;
-  playButton.textContent = "Play";
-}
-
-document.getElementById("prev").onclick = () => { stop(); index = Math.max(0, index - 1); render(); };
-document.getElementById("next").onclick = () => { stop(); index = Math.min(frames.length - 1, index + 1); render(); };
-slider.oninput = () => { stop(); index = Number(slider.value); render(); };
-playButton.onclick = () => {
-  if (timer !== null) { stop(); return; }
-  playButton.textContent = "Pause";
-  timer = setInterval(() => {
-    index = (index + 1) % frames.length;
-    render();
-  }, 650);
+window.SHEETCOPY_CNOT_DEMO = {
+  L: $L,
+  Z: $Z,
+  p: $p,
+  q: $q,
+  r: $r,
+  synch: $synch,
+  T_PRE: $T_PRE,
+  T_POST: $T_POST,
+  CLEANUP_TIME: $CLEANUP_TIME,
+  frames: $frames_js
 };
-render();
 </script>
+<script src="$visualizer_file"></script>
 </body>
 </html>
 """
@@ -1127,7 +1031,67 @@ render();
 end
 
 function run_cnot_demo(L,Z,p,q,r,synch,T_PRE,T_POST,CLEANUP_TIME,out_adj)
-    error("CNOT_DEMO is not implemented for sheet-copy lineages yet.")
+    if L < 4
+        error("CNOT_DEMO expects L >= 4 so the seeded pattern is visible.")
+    end
+
+    Random.seed!(parse(Int, get(ENV, "DEMO_SEED", "7")))
+    pretty = false
+    demo_seed_errors = parse(Int, get(ENV, "DEMO_SEED_ERRORS", string(L)))
+    demo_style = get(ENV, "DEMO_STYLE", "complex")
+    sheets = initial_sheet_set(L,Z)
+    next_lineage_id = Ref(3)
+    html_frames = String[]
+
+    if demo_style == "simple"
+        sheets[1].state_component[2,2,1] = true
+        sheets[1].state_component[3,2,1] = true
+        sheets[2].state_component[2,4,2] = true
+    elseif demo_style == "complex"
+        for _ in 1:demo_seed_errors
+            sheets[1].state_component[rand(1:L),rand(1:L),rand(1:2)] ⊻= true
+            sheets[2].state_component[rand(1:L),rand(1:L),rand(1:2)] ⊻= true
+        end
+    else
+        error("DEMO_STYLE must be \"simple\" or \"complex\".")
+    end
+
+    function add_frame!(label)
+        push!(html_frames, cnot_demo_frame_js(label,sheets,L))
+    end
+
+    add_frame!("seeded initial sheets")
+
+    for t in 1:T_PRE
+        update_sheets!(sheets,r,p,q,synch,pretty)
+        add_frame!("pre round $t")
+    end
+
+    add_frame!("immediately before sheet-copy CNOT")
+    copied_count = apply_cnot_x_sheetcopy!(sheets,CONTROL_BLOCK,TARGET_BLOCK,1,next_lineage_id)
+    add_frame!("after sheet-copy CNOT: copied $copied_count active control sheet(s)")
+
+    for t in 1:T_POST
+        update_sheets!(sheets,r,p,q,synch,pretty)
+        add_frame!("post round $t")
+    end
+
+    for t in 1:CLEANUP_TIME
+        update_sheets!(sheets,r,0,0,true,pretty)
+        add_frame!("ideal cleanup round $t")
+        if all_sheet_hists_empty(sheets)
+            break
+        end
+    end
+
+    qadj = q == 0 ? "" : "_q$(round(q,sigdigits=3))"
+    padj = "_p$(round(p,sigdigits=3))"
+    sadj = ~synch ? "_asynch" : ""
+    style_adj = demo_style == "simple" ? "_simple" : "_complex"
+    base = "2d_CNOT_sheetcopy_demo$style_adj$padj$qadj" * "_L$(L)_Z$(Z)$sadj$out_adj"
+    html_file = "$(base).html"
+    write_cnot_demo_html("[" * join(html_frames, ",") * "]",L,Z,p,q,r,synch,T_PRE,T_POST,CLEANUP_TIME,html_file)
+    return html_file
 end
 
 function run_cnot_sanity_checks(L,Z,r,T_PRE,T_POST,CLEANUP_TIME)
@@ -1223,7 +1187,7 @@ function main()
     * "trel":   compute relaxation time/memory lifetime for online decoding 
     * "Ft":     get decoding fidelity (error rate after a fixed number of noisy decoding rounds) for online decoding     
     * "CNOT_Ft": sheet-copy two-block CNOT fixed-time fidelity test
-    * "CNOT_DEMO": not implemented for sheet-copy lineages yet
+    * "CNOT_DEMO": write lineage-aware sheet-copy HTML demo
     * "CNOT_DEBUG": run small sheet-copy CNOT sanity checks
     * "stats":  get anyon density in the long time steady state
     """
@@ -1314,7 +1278,14 @@ function main()
 
     ### sheet-copy CNOT fixed-time fidelity test ###
     if mode == "CNOT_DEMO"
-        error("CNOT_DEMO is not implemented for sheet-copy lineages yet. Use MODE=CNOT_Ft or MODE=CNOT_DEBUG in this file.")
+        if CNOT_STYLE != "sheetcopy"
+            error("Only CNOT_STYLE=\"sheetcopy\" is implemented in this second-version CNOT simulator.")
+        end
+        println("writing sheet-copy CNOT demo visualization...")
+        html_demo_file = run_cnot_demo(L,Z,p,p*qrat,r,synch,T_PRE,T_POST,CLEANUP_TIME,out_adj)
+        data["demo_files"] = [html_demo_file]
+        data["demo_visualizer_commands"] = ["open $html_demo_file"]
+        println("open HTML demo: $html_demo_file")
 
     elseif mode == "CNOT_Ft"
         if CNOT_STYLE != "sheetcopy"
