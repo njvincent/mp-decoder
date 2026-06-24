@@ -19,7 +19,8 @@ JULIA_SCRIPT=${JULIA_SCRIPT:-2d_windowed_cnot_primitive.jl}
 THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-16}}
 
 # A light first pass over the primitive CNOT simulator. Override any of these
-# from the shell, for example: P_LIST="0.006 0.010" L_LIST="5 7" ACC_ERRORS=20.
+# from the shell, for example:
+# P_LIST="0.006 0.010" L_LIST="5 7" TVAL=L ACC_ERRORS=20.
 P_LIST=(${P_LIST:-0.006 0.008 0.010 0.012 0.014 0.016})
 L_LIST=(${L_LIST:-5 7 9 13})
 QRAT=${QRAT:-1}
@@ -30,8 +31,7 @@ TRIAL_PARALLEL=${TRIAL_PARALLEL:-true}
 CNOT_STYLE=${CNOT_STYLE:-primitive}
 ACC_ERRORS=${ACC_ERRORS:-50}
 SAMPS=${SAMPS:-0}
-T_PRE_DEFAULT=${T_PRE:-L}
-T_POST_DEFAULT=${T_POST:-L}
+TVAL_DEFAULT=${TVAL:-L}
 CLEANUP_TIME_DEFAULT=${CLEANUP_TIME:-auto}
 JULIA_MODULE=${JULIA_MODULE:-julia}
 
@@ -59,8 +59,7 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     export CNOT_STYLE
     export ACC_ERRORS
     export SAMPS
-    export T_PRE="${T_PRE_DEFAULT}"
-    export T_POST="${T_POST_DEFAULT}"
+    export TVAL="${TVAL_DEFAULT}"
     export CLEANUP_TIME="${CLEANUP_TIME_DEFAULT}"
     export JULIA_SCRIPT
     export THREADS_PER_TASK
@@ -71,7 +70,7 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     echo "Submitting ${TOTAL_TASKS} primitive CNOT initial-scan tasks"
     echo "mode=${MODE}, repeats=${NREPEATS}, threads/task=${THREADS_PER_TASK}, max concurrent=${MAX_CONCURRENT}"
     echo "L=(${L_LIST[*]}), p=(${P_LIST[*]}), qrat=${QRAT}, r=${RVAL}, synch=${SYNCH}, logZ=${LOGZ}"
-    echo "T_PRE=${T_PRE_DEFAULT}, T_POST=${T_POST_DEFAULT}, CLEANUP_TIME=${CLEANUP_TIME_DEFAULT}, ACC_ERRORS=${ACC_ERRORS}, SAMPS=${SAMPS}"
+    echo "TVAL=${TVAL_DEFAULT}, CLEANUP_TIME=${CLEANUP_TIME_DEFAULT}, ACC_ERRORS=${ACC_ERRORS}, SAMPS=${SAMPS}"
     sbatch \
         --cpus-per-task="${THREADS_PER_TASK}" \
         --export=ALL \
@@ -97,20 +96,17 @@ L_INDEX=$((COMBO_INDEX / NP))
 PVAL=${P_LIST[$P_INDEX]}
 LVAL=${L_LIST[$L_INDEX]}
 
-if [[ "${T_PRE_DEFAULT}" == "L" ]]; then
-    T_PRE_VAL=${LVAL}
+if [[ "${TVAL_DEFAULT}" == "L" ]]; then
+    TVAL_VAL=${LVAL}
 else
-    T_PRE_VAL=${T_PRE_DEFAULT}
+    TVAL_VAL=${TVAL_DEFAULT}
 fi
 
-if [[ "${T_POST_DEFAULT}" == "L" ]]; then
-    T_POST_VAL=${LVAL}
-else
-    T_POST_VAL=${T_POST_DEFAULT}
-fi
+T_PRE_VAL=$((TVAL_VAL / 2))
+T_POST_VAL=$((TVAL_VAL - T_PRE_VAL))
 
 if [[ "${CLEANUP_TIME_DEFAULT}" == "auto" ]]; then
-    CLEANUP_TIME_VAL=$((2 * (T_PRE_VAL + T_POST_VAL)))
+    CLEANUP_TIME_VAL=$((2 * TVAL_VAL))
 else
     CLEANUP_TIME_VAL=${CLEANUP_TIME_DEFAULT}
 fi
@@ -133,16 +129,15 @@ export TRIAL_PARALLEL
 export CNOT_STYLE
 export ACC_ERRORS
 export SAMPS
-export T_PRE="${T_PRE_VAL}"
-export T_POST="${T_POST_VAL}"
+export TVAL="${TVAL_VAL}"
 export CLEANUP_TIME="${CLEANUP_TIME_VAL}"
 export JULIA_NUM_THREADS="${THREADS_PER_TASK}"
-export OUT_ADJ="_cnot_initial_p${PVAL}_L${LVAL}_rep${REPEAT_INDEX}_Tpre${T_PRE_VAL}_Tpost${T_POST_VAL}${SAMPLE_ADJ}_thr${JULIA_NUM_THREADS}"
+export OUT_ADJ="_cnot_initial_p${PVAL}_L${LVAL}_rep${REPEAT_INDEX}_T${TVAL_VAL}_Tpre${T_PRE_VAL}_Tpost${T_POST_VAL}${SAMPLE_ADJ}_thr${JULIA_NUM_THREADS}"
 
 echo "MODE=${MODE} L=${LVAL} p=${PVAL} repeat=${REPEAT_INDEX}"
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-none} SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID}"
 echo "JULIA_SCRIPT=${JULIA_SCRIPT}"
 echo "JULIA_NUM_THREADS=${JULIA_NUM_THREADS} TRIAL_PARALLEL=${TRIAL_PARALLEL}"
-echo "CNOT_STYLE=${CNOT_STYLE} T_PRE=${T_PRE} T_POST=${T_POST} CLEANUP_TIME=${CLEANUP_TIME} ACC_ERRORS=${ACC_ERRORS} SAMPS=${SAMPS}"
+echo "CNOT_STYLE=${CNOT_STYLE} TVAL=${TVAL} T_PRE=${T_PRE_VAL} T_POST=${T_POST_VAL} CLEANUP_TIME=${CLEANUP_TIME} ACC_ERRORS=${ACC_ERRORS} SAMPS=${SAMPS}"
 
 julia --threads="${JULIA_NUM_THREADS}" "${JULIA_SCRIPT}"

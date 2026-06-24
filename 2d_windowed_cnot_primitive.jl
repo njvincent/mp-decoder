@@ -19,8 +19,8 @@ using Base.Threads
 # c_out = c, t_out = c xor t to the tracked decoder arrays.
 # 
 # Modifications:
-# 1. Both the control and the target first update T rounds before the CNOT 
-#    gate, and they update another T rounds before a 2T rounds of cleanup.
+# 1. Both the control and the target first update T/2 rounds before the CNOT 
+#    gate, and they update another T/2 rounds before 2T rounds of cleanup.
 # 2. The update rule for CNOT is that 
 #    a. state, state_correction, old_synds, new_synds, and hist of the control 
 #       are unchanged, but the target are XORed with the control.
@@ -556,6 +556,21 @@ function update_two_blocks!(
     return nothing
 end
 
+function split_cnot_timing(T)
+    """
+    Split the primitive CNOT protocol's total noisy time T into
+    T/2 rounds before the CNOT, T/2 rounds after the CNOT, and 2T cleanup
+    rounds. For odd T, the extra noisy round is placed after the CNOT.
+    """
+    if T < 1
+        error("CNOT total time T must be positive.")
+    end
+    T_PRE = fld(T,2)
+    T_POST = T - T_PRE
+    CLEANUP_TIME = 2T
+    return T_PRE,T_POST,CLEANUP_TIME
+end
+
 function estimate_primitive_cnot_Ft(L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_TIME,acc_err,fixed_samps,trial_parallel,verbose)
     """
     Monte Carlo estimate of a primitive CNOT fixed-time success probability.
@@ -826,7 +841,7 @@ canvas { width: 100%; height: auto; border: 1px solid #d8dee4; border-radius: 6p
 <span><span class="swatch" style="background:#7b2cbf"></span>history count</span>
 <span><span class="swatch" style="background:#2a9d8f"></span>field site</span>
 </div>
-<p class="meta">L=$L, Z=$Z, p=$p, q=$q, r=$r, synch=$synch, T_PRE=$T_PRE, T_POST=$T_POST, CLEANUP_TIME=$CLEANUP_TIME</p>
+<p class="meta">L=$L, Z=$Z, p=$p, q=$q, r=$r, synch=$synch, T=$(T_PRE + T_POST), T_PRE=$T_PRE, T_POST=$T_POST, CLEANUP_TIME=$CLEANUP_TIME</p>
 </main>
 <script>
 const L = $L;
@@ -1187,9 +1202,10 @@ function main()
     trial_parallel = parse(Bool, get(ENV, "TRIAL_PARALLEL", "true"))
     repeat_adj = haskey(ENV, "REPEAT_INDEX") ? "_rep$(ENV["REPEAT_INDEX"])" : ""
     out_adj = get(ENV, "OUT_ADJ", repeat_adj)
-    T_PRE = parse(Int, get(ENV, "T_PRE", mode == "CNOT_DEMO" ? "6" : string(L)))
-    T_POST = parse(Int, get(ENV, "T_POST", mode == "CNOT_DEMO" ? "6" : string(L)))
-    CLEANUP_TIME = parse(Int, get(ENV, "CLEANUP_TIME", string(2*(T_PRE + T_POST))))
+    T_TOTAL = parse(Int, get(ENV, "TVAL", mode == "CNOT_DEMO" ? "12" : string(L)))
+    T_PRE,T_POST,default_cleanup_time = split_cnot_timing(T_TOTAL)
+    cleanup_time_env = get(ENV, "CLEANUP_TIME", "auto")
+    CLEANUP_TIME = cleanup_time_env == "auto" ? default_cleanup_time : parse(Int, cleanup_time_env)
     CNOT_STYLE = get(ENV, "CNOT_STYLE", "primitive")
     cnot_acc_errors_env = haskey(ENV, "ACC_ERRORS") ? parse(Int, ENV["ACC_ERRORS"]) : nothing
     cnot_samps_env = haskey(ENV, "SAMPS") ? parse(Int, ENV["SAMPS"]) : 0
@@ -1203,6 +1219,8 @@ function main()
         if cnot_samps_env > 0
             params["samps"] = [cnot_samps_env]
         end
+        params["T"] = T_TOTAL
+        params["Ts"] = [T_TOTAL]
         params["T_PRE"] = T_PRE
         params["T_POST"] = T_POST
         params["CLEANUP_TIME"] = CLEANUP_TIME
@@ -1234,6 +1252,7 @@ function main()
     println("field update speed = $r")
     if mode == "CNOT_Ft" || mode == "CNOT_DEMO" || mode == "CNOT_DEBUG"
         println("CNOT style = $CNOT_STYLE")
+        println("T = $T_TOTAL")
         println("T_PRE = $T_PRE, T_POST = $T_POST, CLEANUP_TIME = $CLEANUP_TIME")
         if mode == "CNOT_DEMO"
             println("demo seed = $(get(ENV, "DEMO_SEED", "7"))")
