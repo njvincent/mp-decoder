@@ -17,15 +17,20 @@ NREPEATS=${2:-5}
 MAX_CONCURRENT=${3:-20}
 JULIA_SCRIPT=${JULIA_SCRIPT:-2d_windowed_cnot_primitive.jl}
 THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-16}}
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-OUTPUT_DIR=${OUTPUT_DIR:-cnot_full_scan}
+SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
+PROJECT_DIR=${PROJECT_DIR:-${SUBMIT_DIR}}
+OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_full_scan}
+
+if [[ "${PROJECT_DIR}" != /* ]]; then
+    PROJECT_DIR="${SUBMIT_DIR}/${PROJECT_DIR}"
+fi
 
 if [[ "${OUTPUT_DIR}" != /* ]]; then
-    OUTPUT_DIR="${SCRIPT_DIR}/${OUTPUT_DIR}"
+    OUTPUT_DIR="${PROJECT_DIR}/${OUTPUT_DIR}"
 fi
 
 if [[ "${JULIA_SCRIPT}" != /* ]]; then
-    JULIA_SCRIPT="${SCRIPT_DIR}/${JULIA_SCRIPT}"
+    JULIA_SCRIPT="${PROJECT_DIR}/${JULIA_SCRIPT}"
 fi
 
 P_LIST=(${P_LIST:-0.009 0.010 0.011 0.012 0.013 0.014 0.015 0.016 0.017 0.018 0.019 0.020})
@@ -71,6 +76,7 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     export JULIA_SCRIPT
     export THREADS_PER_TASK
     export JULIA_MODULE
+    export PROJECT_DIR
     export OUTPUT_DIR
 
     mkdir -p logs
