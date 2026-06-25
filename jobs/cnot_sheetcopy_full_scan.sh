@@ -2,11 +2,11 @@
 #SBATCH --job-name=cnot_sheetcopy_full_scan_threaded
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
-#SBATCH --time=24:00:00
+#SBATCH --time=18:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --output=logs/cnot_sheetcopy_full_scan_threaded_%A_%a.out
 #SBATCH --error=logs/cnot_sheetcopy_full_scan_threaded_%A_%a.err
 
