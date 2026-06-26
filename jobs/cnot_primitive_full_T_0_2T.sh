@@ -121,7 +121,7 @@ else
     TVAL_VAL=${TVAL_DEFAULT}
 fi
 
-T_PRE_VAL=$(TVAL_VAL)
+T_PRE_VAL=${TVAL_VAL}
 T_POST_VAL=$((TVAL_VAL - T_PRE_VAL))
 
 if [[ "${CLEANUP_TIME_DEFAULT}" == "auto" ]]; then
@@ -149,6 +149,8 @@ export CNOT_STYLE
 export ACC_ERRORS
 export SAMPS
 export TVAL="${TVAL_VAL}"
+export CNOT_T_PRE="${T_PRE_VAL}"
+export CNOT_T_POST="${T_POST_VAL}"
 export CLEANUP_TIME="${CLEANUP_TIME_VAL}"
 export JULIA_NUM_THREADS="${THREADS_PER_TASK}"
 export OUT_ADJ="_cnot_full_p${PVAL}_L${LVAL}_rep${REPEAT_INDEX}_T${TVAL_VAL}_Tpre${T_PRE_VAL}_Tpost${T_POST_VAL}${SAMPLE_ADJ}_thr${JULIA_NUM_THREADS}"

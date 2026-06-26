@@ -1204,6 +1204,19 @@ function main()
     out_adj = get(ENV, "OUT_ADJ", repeat_adj)
     T_TOTAL = parse(Int, get(ENV, "TVAL", mode == "CNOT_DEMO" ? "12" : string(L)))
     T_PRE,T_POST,default_cleanup_time = split_cnot_timing(T_TOTAL)
+    if haskey(ENV, "CNOT_T_PRE") || haskey(ENV, "CNOT_T_POST")
+        if !(haskey(ENV, "CNOT_T_PRE") && haskey(ENV, "CNOT_T_POST"))
+            error("CNOT_T_PRE and CNOT_T_POST must be set together.")
+        end
+        T_PRE = parse(Int, ENV["CNOT_T_PRE"])
+        T_POST = parse(Int, ENV["CNOT_T_POST"])
+        if T_PRE < 0 || T_POST < 0
+            error("CNOT_T_PRE and CNOT_T_POST must be nonnegative.")
+        end
+        if T_PRE + T_POST != T_TOTAL
+            error("CNOT_T_PRE + CNOT_T_POST must equal TVAL.")
+        end
+    end
     cleanup_time_env = get(ENV, "CLEANUP_TIME", "auto")
     CLEANUP_TIME = cleanup_time_env == "auto" ? default_cleanup_time : parse(Int, cleanup_time_env)
     CNOT_STYLE = get(ENV, "CNOT_STYLE", "primitive")
