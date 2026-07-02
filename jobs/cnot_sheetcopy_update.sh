@@ -34,7 +34,7 @@ if [[ "${JULIA_SCRIPT}" != /* ]]; then
 fi
 
 P_LIST=(${P_LIST:-0.009 0.010 0.011})
-L_LIST=(${L_LIST:19})
+L_LIST=(${L_LIST:-19})
 QRAT=${QRAT:-1}
 RVAL=${RVAL:-3}
 SYNCH=${SYNCH:-true}
