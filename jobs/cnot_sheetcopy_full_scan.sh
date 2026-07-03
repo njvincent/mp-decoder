@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=128G
+#SBATCH --mem=32G
 #SBATCH --output=logs/cnot_sheetcopy_full_scan_threaded_%A_%a.out
 #SBATCH --error=logs/cnot_sheetcopy_full_scan_threaded_%A_%a.err
 
