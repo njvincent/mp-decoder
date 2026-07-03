@@ -2,11 +2,11 @@
 #SBATCH --job-name=cnot_sheetcopy_full_scan_threaded
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
-#SBATCH --time=18:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --output=logs/cnot_sheetcopy_full_scan_threaded_%A_%a.out
 #SBATCH --error=logs/cnot_sheetcopy_full_scan_threaded_%A_%a.err
 
@@ -16,7 +16,7 @@ MODE=${1:-CNOT_Ft}
 NREPEATS=${2:-5}
 MAX_CONCURRENT=${3:-20}
 JULIA_SCRIPT=${JULIA_SCRIPT:-2d_windowed_cnot_sheetcopy.jl}
-THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-16}}
+THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-8}}
 SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
 PROJECT_DIR=${PROJECT_DIR:-${SUBMIT_DIR}}
 OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_sheetcopy/full_scan/T∕2_CNOT_T∕2_2T}
