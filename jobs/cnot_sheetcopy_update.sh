@@ -33,7 +33,7 @@ if [[ "${JULIA_SCRIPT}" != /* ]]; then
     JULIA_SCRIPT="${PROJECT_DIR}/${JULIA_SCRIPT}"
 fi
 
-P_LIST=(${P_LIST:-0.009 0.010 0.011})
+P_LIST=(${P_LIST:-0.009 0.010})
 L_LIST=(${L_LIST:-19})
 QRAT=${QRAT:-1}
 RVAL=${RVAL:-3}
