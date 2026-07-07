@@ -19,7 +19,7 @@ JULIA_SCRIPT=${JULIA_SCRIPT:-2d_windowed_cnot_sheetcopy.jl}
 THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-8}}
 SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
 PROJECT_DIR=${PROJECT_DIR:-${SUBMIT_DIR}}
-OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_sheetcopy/full_scan/T∕2_CNOT_T∕2_2T}
+OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_sheetcopy/full_scan/T∕2_CNOT_T∕2_2T-2}
 
 if [[ "${PROJECT_DIR}" != /* ]]; then
     PROJECT_DIR="${SUBMIT_DIR}/${PROJECT_DIR}"
