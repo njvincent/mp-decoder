@@ -19,14 +19,7 @@ JULIA_SCRIPT=${JULIA_SCRIPT:-2d_windowed_simulation_thread.jl}
 THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-16}}
 SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
 PROJECT_DIR=${PROJECT_DIR:-${SUBMIT_DIR}}
-
-if [[ -z "${OUTPUT_DIR:-}" ]]; then
-    case "${MODE}" in
-        Ft) OUTPUT_DIR="results/baseline/ft/full_scan" ;;
-        trel) OUTPUT_DIR="results/baseline/trel/full_scan" ;;
-        *) OUTPUT_DIR="results/baseline/${MODE}/full_scan" ;;
-    esac
-fi
+OUTPUT_DIR=${OUTPUT_DIR:-results/baseline/ft/full_scan}
 
 if [[ "${PROJECT_DIR}" != /* ]]; then
     PROJECT_DIR="${SUBMIT_DIR}/${PROJECT_DIR}"
