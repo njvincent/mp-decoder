@@ -989,7 +989,11 @@ function parameter_repository(mode,L,Z,p,qrat,r,synch,vary_L,vary_Z,logZ)
         Ls = [L for _ in 1:nps]
         samps_vec = [1 for _ in 1:nps]
 
-        accu_errors_vec = [1000 for i in 1:nps]
+        accu_errors = parse(Int, get(ENV, "ACC_ERRORS", "1000"))
+        if accu_errors < 1
+            error("ACC_ERRORS must be positive in Ft mode.")
+        end
+        accu_errors_vec = [accu_errors for i in 1:nps]
         println("number of logical failures to accumulate: ", accu_errors_vec)
     end
 
