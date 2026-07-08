@@ -5,8 +5,8 @@
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=128G
 #SBATCH --output=logs/cnot_sheetcopy_full_scan_threaded_%A_%a.out
 #SBATCH --error=logs/cnot_sheetcopy_full_scan_threaded_%A_%a.err
 
@@ -19,7 +19,7 @@ JULIA_SCRIPT=${JULIA_SCRIPT:-2d_windowed_cnot_sheetcopy.jl}
 THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-2}}
 SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
 PROJECT_DIR=${PROJECT_DIR:-${SUBMIT_DIR}}
-OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_sheetcopy/full_scan/T∕2_CNOT_T∕2_2T-2}
+OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_sheetcopy/full_scan/T∕2_CNOT_T∕2_2T}
 
 if [[ "${PROJECT_DIR}" != /* ]]; then
     PROJECT_DIR="${SUBMIT_DIR}/${PROJECT_DIR}"
