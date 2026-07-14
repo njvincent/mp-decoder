@@ -158,6 +158,95 @@ It should include:
 Do not describe a new plan only at a high level. The core of each proposal must
 be the concrete update rule and the data structure needed to execute it.
 
+## Response and Documentation Standards
+
+Responses and project documentation should be comprehensive in substance but
+precise, concise, and non-repetitive in presentation.
+
+* Aim to give a complete, well-synthesized answer in one pass. Before writing,
+  identify the full set of relevant issues, dependencies, assumptions, and
+  tradeoffs so that the answer does not require repeated clarification or
+  rediscovery of the same points.
+* Organize explanations in causal and implementation order rather than in the
+  order ideas were discovered. For decoder proposals, normally use:
+
+  1. problem or failure mode,
+  2. design objective,
+  3. proposed state representation,
+  4. update rules and time ordering,
+  5. CNOT behavior,
+  6. readout and failure criterion,
+  7. complexity and scaling,
+  8. validation plan,
+  9. limitations and unresolved questions.
+* State each substantive point once. Do not restate the same conclusion in
+  multiple sections using slightly different wording. Later sections should
+  refer back to the established definition or invariant instead of explaining
+  it again.
+* Distinguish clearly between:
+
+  * facts established by the papers or code,
+  * conclusions inferred from those facts,
+  * working hypotheses,
+  * proposed design choices,
+  * unresolved questions requiring experiments or further derivation.
+* Do not present speculation as an established explanation. When the cause of an
+  observed threshold or performance difference is uncertain, state the evidence
+  and the remaining uncertainty explicitly.
+* Prefer concrete rules, invariants, equations, pseudocode, data layouts, and
+  scaling expressions over broad qualitative descriptions.
+* Define terminology once and use it consistently. Do not introduce multiple
+  names for the same sheet, history object, label, field, correction, or CNOT
+  event unless the distinction is necessary.
+* Use concise sentences and compact paragraphs. Remove conversational filler,
+  repeated motivation, generic background, and conclusions that merely repeat
+  the preceding section.
+* Include all material details needed for implementation or evaluation, but
+  omit details that do not affect decoder behavior, correctness, complexity, or
+  experimental interpretation.
+* When several alternatives exist, compare them using the same criteria in one
+  structured comparison rather than discussing each alternative independently
+  and repeating the criteria.
+* When revising an existing document, consolidate duplicated discussion and
+  maintain one canonical description of each rule or design choice.
+* Do not end with a generic summary that repeats the document. End with only the
+  concrete decision, implementation steps, validation requirements, or open
+  questions that remain actionable.
+
+### Standards for Technical Explanations
+
+For questions about code, papers, or decoder behavior:
+
+* Begin with the direct answer or central mechanism.
+* Explain the minimum necessary background before using it.
+* Follow the actual causal chain or execution order.
+* Connect mathematical statements to the corresponding code state or physical
+  interpretation where relevant.
+* Use examples only when they resolve a specific ambiguity; do not repeat the
+  full explanation through multiple analogous examples.
+* Explicitly identify any mismatch between the user's proposed interpretation,
+  the paper, and the implementation.
+
+### Standards for Design Proposals
+
+A proposed decoder plan must form one internally consistent design, not a list
+of loosely connected ideas.
+
+* Specify one canonical state model and one canonical update sequence.
+* Show how the proposed mechanism addresses the identified failure mode.
+* Account for all stored information and all operations contributing to memory
+  and runtime overhead.
+* Give scaling in terms of relevant quantities such as lattice size, window
+  depth, number of logical blocks, circuit depth, number of CNOT events, and
+  number of active dependencies.
+* Explain what information is preserved, compressed, merged, or discarded and
+  why discarding it should not invalidate decoding.
+* Separate required components from optional optimizations.
+* Avoid presenting minor variations of the same mechanism as independent plans.
+  Combine them into one plan with clearly labeled implementation choices.
+* State the strongest expected advantage, the principal risk, and the experiment
+  that would most directly falsify the proposal.
+
 ## Suggested Next Work
 
 1. Read `docs/qec_paper_index.md` and
