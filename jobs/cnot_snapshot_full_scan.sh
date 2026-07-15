@@ -7,8 +7,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --output=logs/cnot_snapshot/full_scan/cnot_snapshot_full_scan_%A_%a.out
-#SBATCH --error=logs/cnot_snapshot/full_scan/cnot_snapshot_full_scan_%A_%a.err
+#SBATCH --output=logs/cnot_snapshot_full_scan_%A_%a.out
+#SBATCH --error=logs/cnot_snapshot_full_scan_%A_%a.err
 
 set -euo pipefail
 
@@ -79,7 +79,7 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     export PROJECT_DIR
     export OUTPUT_DIR
 
-    mkdir -p logs/cnot_snapshot/full_scan
+    mkdir -p logs
     mkdir -p "${OUTPUT_DIR}"
 
     echo "Submitting ${TOTAL_TASKS} snapshot CNOT full-scan tasks"
