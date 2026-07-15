@@ -59,6 +59,11 @@ sections and the existing implementation.
   - Second CNOT extension attempt.
   - Sheet-copy rule: keep an independent copy of the control sheet and merge it
     with the target only at final readout.
+- `projects/mp-decoder/2d_windowed_cnot_snapshot.jl`
+  - Physical snapshot CNOT prototype.
+  - Keeps two observable physical blocks, separate pre-/post-gate decoder
+    histories, and `applies_to` correction-routing vectors.
+  - Currently supports one synchronous ideal X-sector CNOT.
 - `projects/mp-decoder/2d_windowed_history_visualizer.py`
   - History visualization support.
 - `projects/mp-decoder/2d_cnot_sheetcopy_visualizer.js`
@@ -83,7 +88,14 @@ sections and the existing implementation.
    - Advantage: threshold/performance is comparable to the baseline.
    - Drawback: each CNOT copies sheets and can double classical overhead, so it
      does not scale for circuits with many CNOT gates.
-5. Current research task: design a new CNOT/computation decoder plan that keeps
+5. Physical snapshot prototype exists in `2d_windowed_cnot_snapshot.jl`.
+   - Separates the two noisy/measured physical outputs from old decoder
+     histories and deletes old histories after their defects are cleared.
+   - Includes `applies_to::BitVector` for future repeated-gate correction
+     routing, but the current driver implements only one CNOT.
+   - Zero-noise and small noisy regression tests pass; no threshold scan is
+     established.
+6. Current research task: evaluate and extend a CNOT/computation decoder that keeps
    enough history for good threshold behavior without the sheet-copy overhead
    blowup.
 
@@ -157,6 +169,21 @@ It should include:
 
 Do not describe a new plan only at a high level. The core of each proposal must
 be the concrete update rule and the data structure needed to execute it.
+
+## Implementation Documentation
+
+`docs/implementation.md` is the authoritative description of the current implementation.
+
+Whenever a coding task changes the architecture, data structures, physical/error model, decoder semantics, interfaces, execution flow, performance characteristics, supported behavior, limitations, or implementation status, update `docs/implementation.md` in the same task.
+
+The documentation must describe the final implemented behavior, not merely the intended plan. Remove or revise statements that are no longer accurate. Clearly distinguish:
+
+* currently implemented behavior;
+* known limitations or approximations;
+* proposed but unimplemented work.
+
+Do not update `docs/implementation.md` for formatting changes, comments, tests, or internal refactors that do not affect documented behavior. Before completing a coding task, explicitly check whether the implementation documentation needs revision.
+
 
 ## Response and Documentation Standards
 
