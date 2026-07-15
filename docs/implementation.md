@@ -37,6 +37,13 @@ The repository has two decoder-code lineages:
          - Keeps one complete baseline decoder state per lineage sheet and
            calls `update!` once per sheet.
 
+      3. Physical snapshot: `2d_windowed_cnot_snapshot.jl`
+
+         - Keeps exactly one physical error/syndrome channel per observable
+           block and separate pre-/post-gate decoder histories.
+         - Routes recovery contributions with `applies_to::BitVector` rather
+           than deep-copying physical sheets.
+
 2. Block-level fork
 
    1. Block CNOT driver: `2d_windowed_cnot_block.jl`
@@ -565,6 +572,66 @@ The saved sheet-count metrics are:
 - `sheetcopy_max_active_sheet_count`;
 - first-trial total and active count traces.
 
+#### 4.3.4 Physical snapshot CNOT
+
+`2d_windowed_cnot_snapshot.jl` is a separate synchronous prototype derived
+from the legacy sheet-copy driver. It implements one ideal X-sector CNOT
+between two blocks and rejects a second CNOT or `SYNCH=false`.
+
+Physical and decoder state are separated:
+
+~~~text
+PhysicalBlock:
+    errors, old_synds, new_synds, saved_correction,
+    noise_rounds, measurement_rounds
+
+DecoderHistory:
+    history_id, live_block, applies_to,
+    hist, fields, new_fields, hist_correction, correction
+~~~
+
+Only the two `PhysicalBlock`s receive physical noise, measurement noise, and
+syndrome calculation. A live history is attached to one physical block. An
+old history has `live_block=nothing` and advances only its stored defects,
+fields, and corrections with an empty new front slice.
+
+At the CNOT `c -> t`:
+
+~~~text
+errors[t]           xor= errors[c]
+saved_correction[t] xor= saved_correction[c]
+for every existing history h:
+    h.applies_to[t] xor= h.applies_to[c]
+~~~
+
+The two existing live histories then become old histories without copying
+their arrays. Fresh empty live control and target histories are allocated with
+unit `applies_to` vectors. The control syndrome baseline remains its last
+measured value. The target baseline becomes the XOR of the last measured
+control and target syndromes. No noise or measurement occurs at the gate.
+
+After the gate there are at most four histories before deletion:
+
+~~~text
+pre-control:  applies_to = [control,target], old
+pre-target:   applies_to = [target],         old
+post-control: applies_to = [control],        live
+post-target:  applies_to = [target],         live
+~~~
+
+An empty old history is folded into `saved_correction` for every selected
+output and deleted. Readout XORs the physical error array, saved correction,
+and the correction from every remaining history whose `applies_to` bit selects
+that block. Cleanup runs live histories with `p=q=0`, old histories with the
+history-only rule, and succeeds only when every remaining history is empty.
+
+For one worker, the physical state remains fixed at two blocks. Decoder work
+is at most four history updates per round immediately after the gate and falls
+as old histories empty. The dominant field storage is at most `4 * 12NZ`
+machine integers before deletion. This version has no threshold evidence and
+does not yet provide a repeated-gate driver; `applies_to` is present to support
+that later extension without a deep-copied lineage tree.
+
 
 ## 5. Comparison and Evidence
 
@@ -578,6 +645,7 @@ the active worker count for threaded scans.
 | Baseline | 1 | Not applicable | `M_block` | `U_block` | None |
 | Primitive | 2 | One merged history; fields compressed with `nonzeromin` | `2 M_block` | `2 U_block` | No gate-count growth |
 | Sheet-copy | `S` | Separate hidden target and copied-control decoder sheets | `S M_block + O(S)` | `S U_block` | Full-state lineage recurrence; alternating gates can grow as Fibonacci |
+| Snapshot | 2 physical blocks, up to 4 histories | Separate pre-/post-gate histories; only observable blocks are measured | Up to about `4 M_block` before old-history deletion | Up to `4 U_block`, falling as old histories empty | Repeated driver not implemented; `applies_to` avoids deep-copy routing |
 | Block | 2 | One observable XOR-combined history; target fields rebuilt | `2 M_block + O(A)` metadata | `2 U_block`, independent of `A` | Decoder state fixed; stored metadata can follow the same Fibonacci recurrence |
 
 The central tradeoff is therefore:
@@ -586,6 +654,9 @@ The central tradeoff is therefore:
   histories and messages;
 - sheet-copy preserves component histories but pays one decoder and one later
   stochastic channel per sheet;
+- snapshot preserves separate pre-/post-gate histories while using only two
+  physical channels, but can temporarily require four decoder histories and
+  forbids matching between histories;
 - block restores one physical/measurement channel per output and fixed decoder
   state, but uses a field reset whose decoding performance is not yet
   established.
@@ -657,21 +728,40 @@ No threshold or matched full-scan result is established for the block-level
 field-reset rule. New scans are required before claiming baseline-like or
 sheet-copy-like performance.
 
+#### 5.2.5 Snapshot CNOT
+
+Only zero-noise and small deterministic/noisy regression runs are established
+for `2d_windowed_cnot_snapshot.jl`. No threshold or matched full-scan result is
+available. Legacy sheet-copy scan values cannot be transferred because the
+snapshot model has one physical and measurement channel per output rather than
+one channel per hidden sheet.
+
 ## 6. Validation and Operational Caveats
 
 ### 6.1 Validation and diagnostics
 
-The three CNOT drivers expose `MODE=CNOT_DEBUG`:
+The CNOT drivers expose `MODE=CNOT_DEBUG`:
 
 ~~~bash
 MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_primitive.jl
 MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_sheetcopy.jl
 MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_block.jl
+MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 CLEANUP_TIME=4 SYNCH=true \
+    TRIAL_PARALLEL=false julia --threads=1 2d_windowed_cnot_snapshot.jl
 ~~~
 
 The sheet-copy and block commands complete successfully. Sheet-copy debug mode
 checks baseline single-sheet equivalence, deep-copy ownership, lineage IDs,
 merged readout, and zero-noise behavior.
+
+Snapshot debug mode checks physical CNOT algebra, the XOR target syndrome
+baseline, live/old history ownership, `applies_to`, one physical update per
+block, deletion/readout invariance, and zero-noise cleanup. Its separate test
+suite also runs a small noisy sample:
+
+~~~bash
+julia --startup-file=no test/snapshot_runtests.jl
+~~~
 
 Primitive debug mode is intended to check XOR propagation, `nonzeromin`,
 field-buffer clearing, and zero-noise success. Its current sanity function uses
@@ -720,6 +810,12 @@ models and should not be compared as if both were physical-block counts.
   the opt-in, exception-catching `safe_alert` path instead.
 - Sheet-copy deep-copies only active control sheets, never prunes allocated
   sheets, and applies later noise once per sheet.
+- Snapshot CNOT supports one ideal X-sector gate, two blocks, and synchronous
+  updates only. It has no `CNOT_DEMO` mode or threshold scan evidence yet.
+- Snapshot old histories receive an empty front slice and cannot match defects
+  with other old or live histories; the performance cost is unknown.
+- Snapshot `applies_to` implements future correction routing, but the current
+  driver rejects a second CNOT.
 - Block ancestry is dynamically irrelevant but not memory-free. Its byte
   diagnostics exclude ancestry.
 - Block asynchronous dynamics are not the legacy baseline asynchronous
@@ -737,4 +833,4 @@ models and should not be compared as if both were physical-block counts.
   paths in shell commands.
 - Core decoder code is duplicated. Any behavioral fix must be reviewed
   deliberately across the serial baseline, threaded baseline, primitive,
-  sheet-copy, and block files.
+  sheet-copy, snapshot, and block files.
