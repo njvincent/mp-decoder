@@ -1,787 +1,740 @@
 # mp-decoder Implementation Documentation
 
-Last updated: 2026-07-08
-
-This document summarizes the existing Julia implementations in this repository
-so an agent can understand the data structures, update rules, performance
-behavior, and classical overhead without rereading every file from scratch. It
-is still not a license to edit decoder logic blindly: before changing an update
-rule, re-check the relevant Julia function and the reference papers listed in
-`agent.md`.
-
-## Implementation Map
-
-- `2d_windowed_simulation.jl`
-  - Serial baseline 2D windowed message-passing decoder for one toric-code error
-    sector.
-  - Contains the reference `update!` rule and all baseline Monte Carlo modes.
-- `2d_windowed_simulation_thread.jl`
-  - Threaded baseline. The local decoder rule is intended to be equivalent to
-    `2d_windowed_simulation.jl`.
-  - Adds trial-level parallelism for independent Monte Carlo samples.
-- `2d_windowed_cnot_primitive.jl`
-  - First CNOT prototype.
-  - Duplicates the baseline decoder and adds a two-block X-sector CNOT
-    bookkeeping map that immediately merges control information into the
-    target arrays.
-- `2d_windowed_cnot_sheetcopy.jl`
-  - Second CNOT prototype.
-  - Duplicates the baseline decoder and adds explicit decoder-sheet lineages.
-    A CNOT deep-copies active control sheets to the target and defers algebraic
-    merging until final readout.
-- `2d_windowed_history_visualizer.py`
-  - Visualizes saved baseline or primitive CNOT history data.
-- `2d_cnot_sheetcopy_visualizer.js`
-  - Browser-side visualization support for sheet-copy CNOT demos.
-- `jobs/`
-  - Slurm scan scripts for baseline, primitive CNOT, and sheet-copy CNOT runs.
-- `results/`
-  - Saved scan outputs. Treat these as data, not scratch files.
-
-## Conventions
-
-The current implementations track one error sector. The CNOT prototypes are
-explicitly X-sector demonstrations. They do not implement a full surface-code
-CNOT, a Z-sector propagation rule, labeled defects, or a CNOT gate fault model.
-
-The physical toric-code state is a Boolean array:
-
-```text
-state :: L x L x 2
-```
-
-The last index is the edge orientation:
+Last updated: 2026-07-15
 
-- `o = 1`: x-directed edge from `(i,j)` to `(i+1,j)`.
-- `o = 2`: y-directed edge from `(i,j)` to `(i,j+1)`.
-
-Spatial boundary conditions are periodic in the main scans. The helper
-`init_2d` contains a finite-boundary branch, but the Monte Carlo paths use
-`"periodic"`.
-
-The syndrome array is:
-
-```text
-synds :: L x L
-synds[i,j] = state[i,j,1] xor state[i,j,2] xor
-             state[i-1,j,1] xor state[i,j-1,2]
-```
-
-All spatial indices are wrapped with `mod1`. RG-time indices are clamped to
-`1:Z` when looking up neighbors for field updates.
-
-Important naming caveat: `detect_logical_error(state)` returns `true` when the
-decoded state has trivial winding in both cycles, so it is logically successful.
-Most callers convert this to a failure indicator with
-`1 - detect_logical_error(...)` or `!detect_logical_error(...)`.
-
-Default RG depth is:
+This document describes the implemented Julia behavior, with emphasis on state
+ownership, update order, and classical overhead. The Markdown paper notes
+explain the physical motivation; the Julia source remains authoritative for
+the actual simulator.
 
-```text
-Z = ceil(Int, log(1.5, L))   if LOGZ=true
-Z = ceil(Int, L/4)           if LOGZ=false
-```
-
-The common scan defaults are `QRAT=1`, `RVAL=3`, `SYNCH=true`, `LOGZ=true`.
-Measurement noise is set as `q = qrat * p`.
+## 1. Orientation
 
-## Baseline Memory Decoder
-
-### Live State
-
-One baseline decoder block has these live arrays:
-
-```text
-state             :: L x L x 2 Bool
-state_correction  :: L x L x 2 Bool
-old_synds         :: L x L Bool
-new_synds         :: L x L Bool
-hist              :: L x L x Z Bool
-hist_correction   :: L x L x Z x 3 Bool
-fields            :: L x L x Z x 3 x 2 Int
-new_fields        :: L x L x Z x 3 x 2 Int
-```
+### 1.1 Implementation hierarchy
 
-`hist` is not the current syndrome. It is the rolling RG-time history of
-syndrome-changing events:
+The repository has two decoder-code lineages:
 
-```text
-hist[:,:,1] = old_synds xor new_synds
-```
+1. Legacy baseline kernel
 
-after the RG cycle makes room at the front of the window.
+   1. Serial memory driver: `2d_windowed_simulation.jl`
 
-`fields` stores integer distance messages. The fourth index is the axis:
+      - Reference one-block `update!` and baseline Monte Carlo modes.
 
-- `a = 1`: x direction.
-- `a = 2`: y direction.
-- `a = 3`: RG-time direction.
+   2. Trial-parallel memory driver: `2d_windowed_simulation_thread.jl`
 
-The fifth index is direction. In the feedback rule:
+      - Decoder helpers from `circle_distance` through `get_decoding_time` are
+        byte-identical to the serial file.
+      - Parallelism is across independent trials, not within a decoder round.
 
-- `fields[...,1,1]` means the preferred x move is toward `i-1`.
-- `fields[...,1,2]` means the preferred x move is toward `i+1`.
-- `fields[...,2,1]` means the preferred y move is toward `j-1`.
-- `fields[...,2,2]` means the preferred y move is toward `j+1`.
-- `fields[...,3,2]` is used for motion toward `k+1`.
+   3. CNOT extensions that retain the same legacy `update!`
 
-Zero means "no message". This is why CNOT code uses `nonzeromin` instead of a
-plain minimum when merging field arrays.
+      1. Primitive merge: `2d_windowed_cnot_primitive.jl`
 
-### Field Update Rule
+         - Keeps two baseline decoder states and merges control state directly
+           into the target at the gate.
 
-`onesite_field_update(i,j,k,fields,hist)` computes all six outgoing field
-values for one space-time point. For each axis `a` and direction `s`, it scans
-the nine neighboring sites one step away along axis `a` and with offsets
-`-1:1` along the other two axes. It sets the new field to the minimum of:
+      2. Legacy sheet-copy: `2d_windowed_cnot_sheetcopy.jl`
 
-- the 1-norm distance to a neighboring active history event, and
-- a neighboring nonzero field plus the same 1-norm distance.
+         - Keeps one complete baseline decoder state per lineage sheet and
+           calls `update!` once per sheet.
 
-If no neighboring source or field exists, the new field is zero.
+2. Block-level fork
 
-The synchronous field update `update_2d_windowed_fields!` computes this for
-every `(i,j,k)` into `new_fields`, then copies `new_fields` into `fields`.
+   1. Block CNOT driver: `2d_windowed_cnot_block.jl`
 
-The asynchronous field update `update_2d_windowed_fields_column!` only updates
-one spatial processor column `(i,j,:)`.
+      - Keeps one observable decoder per physical block.
+      - Preserves the synchronous feedback order but intentionally changes the
+        asynchronous physical-round schedule.
 
-### Synchronous Decoder Step
+   2. Block regression suite: `test/runtests.jl`
 
-`update!(..., r, p, q, synch=true, pretty)` performs one online decoding step.
-The synchronous branch is the reference rule:
+      - Includes only the import-guarded block driver.
+      - Tests CNOT algebra, observable noise/measurement channels, ancestry
+        invariance, combined decoding, and cleanup.
 
-1. Update all fields `r` times. If `pretty=true`, update them `r-1` times here
-   and do one extra source-smoothing update after the new syndrome is inserted.
-2. Clear `hist_correction`.
-3. For every active history event `hist[i,j,k]`, inspect local fields and choose
-   a correction direction with smallest positive field value.
-4. In the bulk (`k < Z`), the tie priority is:
+The CNOT drivers are separate algorithms, not selectable front ends for one
+shared implementation. They also duplicate the baseline non-CNOT modes, so a
+change in one file does not propagate automatically to the others.
 
-```text
-+z, -x, -y, +y, +x
-```
+## 2. Common Model, Notation, and Cost Unit
 
-5. On the back wall (`k == Z`), only spatial moves are allowed. A move is
-   attempted with probability `0.8`; this stochasticity is intended to break
-   locked cycles. The tie priority is:
+### 2.1 Physical and syndrome arrays
 
-```text
--x, -y, +y, +x
-```
+All implementations track one toric-code error sector. The CNOT prototypes
+implement only the X-sector propagation
 
-6. Convert spatial history corrections into physical state corrections:
-
-```text
-state_correction[i,j,a] xor= xor_reduce(hist_correction[i,j,:,a])
-```
-
-for `a = 1,2`.
-
-7. Apply all history corrections with `perform_correction!`. A correction link
-   toggles the two endpoint history sites. Axis 3 toggles `(i,j,k)` and
-   `(i,j,k+1)`.
-8. Apply physical noise to every edge independently with probability `p`.
-9. Shift syndrome registers:
-
-```text
-old_synds = new_synds
-new_synds = get_synds(state)
-new_synds xor= measurement_noise(q)
-```
-
-10. Run `rg_cycle!`:
-
-- `hist[:,:,Z] xor= hist[:,:,Z-1]` splats the old front of the back wall.
-- `hist[:,:,2:end-1] = hist[:,:,1:end-2]` shifts history toward larger `k`.
-- `hist[:,:,1] = false` clears the front slice.
-- For fields, the back-wall spatial messages are preserved by
-  `nonzeromin(fields[:,:,Z-1,1:2,:], fields[:,:,Z,1:2,:])`.
-- Middle field slices shift forward in RG time.
-- `fields[:,:,1,:,:] = 0` clears the front slice.
-
-11. Insert the new syndrome-change events:
-
-```text
-hist[:,:,1] = old_synds xor new_synds
-```
-
-12. If `pretty=true`, source fields around active anyons with
-`anyons_source_fields!` and do one final field update for smoother animations.
-
-### Asynchronous Decoder Step
-
-The asynchronous branch of `update!` runs `(r+1) * L^2` microsteps. Each
-microstep chooses a random spatial column `(i,j)`.
-
-- With probability `r/(r+1)`, it updates fields only in that column.
-- With probability `1/(r+1)`, it performs feedback, noise, single-site syndrome
-  refresh, and RG cycling for that column.
-
-Spatial corrections are applied immediately to `state_correction` and `hist`.
-Vertical RG-time corrections are accumulated in a temporary `vertical_correction`
-vector and then applied with `perform_correction_column!`.
-
-Physical noise in this branch toggles one random edge with probability `p` per
-feedback microstep, rather than applying independent noise to every edge in a
-global sweep. This branch is present but the main scans use `SYNCH=true`.
-
-### Offline Decoding
-
-`get_decoding_time(state,old_synds,new_synds,hist,r,synch)` decodes a copy of a
-history with `p=q=0` until either:
-
-- `hist` is empty, or
-- `t > L^2`.
-
-It returns the number of ideal decoding steps used. It constructs fresh fields
-and corrections for the copied run.
-
-### Failure Criteria
-
-The decoded state is always:
-
-```text
-decoded_state = state xor state_correction
-```
-
-When cleanup succeeds and `hist` is empty, callers assert that
-`get_synds(decoded_state)` is zero. Logical success is then
-`detect_logical_error(decoded_state) == true`.
-
-Some Monte Carlo paths still call `detect_logical_error` even when cleanup left
-nonzero history; this behavior is intentional in the current code and should
-not be changed silently.
-
-### Baseline Modes
-
-`MODE` selects the simulation:
-
-- `hist`: save a single evolution history for visualization.
-- `erode`: offline decode random initial states with no further noise.
-- `quench`: track preparation/decoding time from random initial state.
-- `trel`: estimate relaxation time or memory lifetime. The code periodically
-  decodes a copy and stops a sample on logical failure.
-- `Ft`: fixed-time online decoding fidelity. Default `T=L`; after noisy
-  evolution, run `2T` ideal cleanup steps.
-- `stats`: thermalize and estimate steady-state anyon density.
-
-For `Ft`, the recorded value is:
-
-```text
-Ft = 1 - logical_failures / trials
-```
-
-The default `ACC_ERRORS` is 1000 in the threaded baseline and CNOT scan scripts.
-
-## Threaded Baseline
-
-`2d_windowed_simulation_thread.jl` keeps the local decoder functions equivalent
-to the serial baseline and adds `using Base.Threads`.
-
-Parallelism is trial-level, not intra-trial. Each worker allocates its own
-state, history, field buffers, and correction buffers. This applies to:
-
-- `erode`: split the target logical-failure count across workers.
-- `trel`: split samples by worker stride.
-- `Ft`: split the target logical-failure count across workers.
-
-Consequences:
-
-- The local update rule should match the serial implementation.
-- Random trajectories are not bitwise reproducible across different thread
-  counts because worker scheduling and RNG consumption differ.
-- Resident memory scales approximately with the number of active workers times
-  the per-trial decoder memory.
-
-## Primitive CNOT Prototype
-
-### Scope
-
-`2d_windowed_cnot_primitive.jl` implements an X-sector two-block CNOT
-bookkeeping experiment. It is not a full computation decoder.
-
-The tracked rule is:
-
-```text
+~~~text
 control_out = control
 target_out  = target xor control
-```
+~~~
 
-Only control-to-target X-sector propagation is represented.
+They use an ideal instantaneous gate with no gate-fault channel. They do not
+implement the complementary Z-sector rule, circuit-level syndrome extraction,
+hook errors, or a full fault-tolerant logical CNOT.
 
-### Live State
+An edge configuration has shape
 
-Primitive CNOT uses two independent copies of the baseline arrays:
+~~~text
+L x L x 2
+~~~
 
-```text
-control: state_c, state_correction_c, old_synds_c, new_synds_c,
-         hist_c, hist_correction_c, fields_c, new_fields_c
+where orientation 1 is the edge from `(i,j)` toward `(i+1,j)`, and
+orientation 2 is the edge toward `(i,j+1)`. Main simulation paths use periodic
+spatial boundaries. The syndrome is
 
-target:  state_t, state_correction_t, old_synds_t, new_synds_t,
-         hist_t, hist_correction_t, fields_t, new_fields_t
-```
+~~~text
+synds[i,j] =
+    state[i,j,1] xor state[i,j,2] xor
+    state[i-1,j,1] xor state[i,j-1,2]
+~~~
 
-There is no lineage structure and no per-gate sheet storage.
+with spatial indices wrapped by `mod1`.
 
-`update_two_blocks!` simply applies the ordinary baseline `update!` to control
-and target separately with the same `(r,p,q,synch,pretty)` arguments.
+The physical-error array and accumulated recovery array are kept separate.
+The baseline names them `state` and `state_correction`; the block model
+names them `errors` and `pauli_frame`. Decoder feedback changes the
+recovery array and the buffered history, not the physical-error array. Readout
+uses their XOR.
 
-### Timing
+### 2.2 Buffer and scan parameters
 
-`split_cnot_timing(T)` returns:
+`hist[i,j,k]` is a rolling buffer of syndrome-change events, not the current
+syndrome:
 
-```text
-T_PRE       = floor(T/2)
-T_POST      = T - T_PRE
+~~~text
+new front event = old_synds xor new_synds
+~~~
+
+The coordinate `k=1:Z` is a decoder buffer/RG coordinate. It is not physical
+time and is not Pauli Z. The default depth is
+
+~~~text
+Z = ceil(Int, log(1.5, L))   when LOGZ=true
+Z = ceil(Int, L/4)           when LOGZ=false
+~~~
+
+Common defaults are `r=3`, `q=p`, `SYNCH=true`, and `LOGZ=true`.
+
+### 2.3 Cost notation
+
+Let
+
+~~~text
+N = L^2
+w = sizeof(Int)
+~~~
+
+and define one baseline block working state as
+
+~~~text
+M_block =
+    12 N Z machine Ints
+    + (6 N + 4 N Z) packed Boolean bits
+    + Julia array/container overhead
+~~~
+
+The two field buffers supply the `12NZ` integer words and dominate memory.
+On a 64-bit build, those buffers alone use `96NZ` bytes. Packed
+`BitArray` storage is rounded to machine-word boundaries, so the bit formula
+is a content count rather than an exact `Base.summarysize` result.
+
+One synchronous block round, or one legacy asynchronous block round in
+expectation, costs
+
+~~~text
+U_block = Theta((r + 1) N Z)
+~~~
+
+because field propagation and feedback both scan `Theta(NZ)` sites. The
+current `onesite_field_update` also creates a fresh `3 x 2` integer array
+for every updated buffer site, producing `Theta(rNZ)` small transient
+allocations per global field-sweep sequence.
+
+These units describe the live decoder working set. History/demo modes store
+whole time series and add `Theta(TNZ)` output storage. Threaded execution
+multiplies trial-local working state by the number of active workers.
+
+## 3. Baseline Memory Decoder
+
+This section is canonical for the serial baseline, threaded baseline,
+primitive block arrays, and legacy sheet-copy sheets. The block file reuses
+the same message and feedback rules but changes physical-round acquisition as
+described in Section 4.4.2.
+
+### 3.1 Per-block state
+
+| Array | Shape and element type | Meaning |
+| --- | --- | --- |
+| `state` | `L x L x 2 BitArray` | Accumulated physical X errors. |
+| `state_correction` | `L x L x 2 BitArray` | Accumulated spatial recovery chain/Pauli frame. |
+| `old_synds` | `L x L BitArray` | Previous measured syndrome register. |
+| `new_synds` | `L x L BitArray` | Latest measured syndrome register. |
+| `hist` | `L x L x Z BitArray` | Buffered syndrome-change defects. |
+| `hist_correction` | `L x L x Z x 3 BitArray` | Proposed recovery links in x, y, and buffer directions. |
+| `fields` | `L x L x Z x 3 x 2 Array{Int}` | Current six directed distance messages. |
+| `new_fields` | same as `fields` | Jacobi/synchronous field-update buffer and asynchronous column buffer. |
+
+For `fields[i,j,k,a,s]`, `a=1,2,3` denotes x, y, and buffer directions.
+Zero means “no message,” not distance zero. In the feedback convention:
+
+| Field component | Selected move |
+| --- | --- |
+| `[1,1]`, `[1,2]` | `-x`, `+x` |
+| `[2,1]`, `[2,2]` | `-y`, `+y` |
+| `[3,2]` | toward larger `k` |
+
+`nonzeromin(a,b)` is therefore required whenever two message values are
+compared componentwise and one may be absent.
+
+### 3.2 Update rules
+
+#### 3.2.1 Message update
+
+`onesite_field_update(i,j,k,fields,hist)` computes six outgoing messages.
+For each axis and direction, it examines the nine sites in the neighboring
+`3 x 3` plane one step away along that axis. The candidate value is the
+minimum of:
+
+- the 1-norm distance to an active history event; and
+- a nonzero incoming message plus that distance.
+
+If no source or incoming message exists, the result is zero. Spatial indices
+are periodic; buffer-neighbor indices are clamped to `1:Z`.
+
+`update_2d_windowed_fields!` computes every site into `new_fields` before
+copying to `fields`. The asynchronous helper updates only one spatial
+processor column `(i,j,:)`.
+
+#### 3.2.2 Synchronous round
+
+For `synch=true`, `update!` performs this ordered sequence:
+
+1. Run `r` global message sweeps. With `pretty=true`, run `r-1` now and
+   reserve one sweep for the end of the round.
+2. Clear `hist_correction`.
+3. For every active `hist[i,j,k]`, select the smallest positive local
+   message. In the bulk, ties are resolved in this order:
+
+   ~~~text
+   +buffer, -x, -y, +y, +x
+   ~~~
+
+4. On the back wall `k=Z`, permit only spatial moves. A selected defect moves
+   with probability `0.8`; the tie order is:
+
+   ~~~text
+   -x, -y, +y, +x
+   ~~~
+
+5. XOR the parity of all spatial `hist_correction` links in a buffer column
+   into `state_correction`.
+6. Apply every proposed link to `hist`. A spatial link toggles its two
+   spatial endpoints; a buffer link toggles `k` and `k+1`.
+7. Toggle every physical edge independently with probability `p`.
+8. Set `old_synds = new_synds`, calculate `get_synds(state)`, and XOR an
+   independent Bernoulli(`q`) measurement mask into `new_synds`.
+9. Run the RG cycle:
+
+   - XOR slice `Z-1` into the back-wall history;
+   - shift intermediate history toward larger `k`;
+   - clear history slice 1;
+   - merge the old and incoming back-wall spatial fields with
+     `nonzeromin`;
+   - shift intermediate fields and clear field slice 1.
+
+10. Insert `old_synds xor new_synds` into `hist[:,:,1]`.
+11. With `pretty=true`, seed source-adjacent fields and run the reserved
+    message sweep.
+
+#### 3.2.3 Legacy asynchronous round
+
+The serial baseline, threaded baseline, primitive, and sheet-copy files use the
+same legacy asynchronous branch. It runs `(r+1)N` random-column microsteps.
+Each microstep is:
+
+- a field-column update with probability `r/(r+1)`; or
+- a feedback/noise/syndrome/RG-column update with probability `1/(r+1)`.
+
+Spatial corrections are applied immediately. Buffer-direction proposals use a
+temporary `Z`-bit vector and are then applied to the selected column.
+
+The physical stochastic meaning differs from the synchronous branch:
+
+- a feedback microstep toggles one uniformly random edge with probability
+  `p`, rather than sampling every edge once;
+- only the selected syndrome site is refreshed with measurement probability
+  `q`;
+- the selected history/field column is cycled, so columns may be updated
+  repeatedly or not at all during one outer call.
+
+Consequently, `p` and `q` are not the same per-round Bernoulli channels in
+the two update modes. Main performance scans use `SYNCH=true`.
+
+### 3.3 Cleanup, readout, and logical test
+
+The decoded edge configuration is
+
+~~~text
+decoded_state = state xor state_correction
+~~~
+
+`detect_logical_error(decoded_state)` is named misleadingly: it returns
+`true` when both torus winding parities are trivial, hence when the logical
+test succeeds. Callers negate it or subtract it from one to obtain failure.
+
+`get_decoding_time` copies the physical, syndrome, and history state, creates
+fresh decoder fields/corrections, and repeatedly calls `update!` with
+`p=q=0`. Fixed-time modes similarly run ideal cleanup after the noisy
+interval.
+
+When cleanup empties `hist`, the drivers assert that the decoded state is
+syndrome-free. Several paths still evaluate winding even if cleanup times out
+with nonempty history. That implemented failure convention must not be changed
+silently.
+
+### 3.4 Execution variants and overhead
+
+#### 3.4.1 Serial baseline
+
+`2d_windowed_simulation.jl` owns one baseline block state per active
+trajectory. Its main modes are:
+
+| Mode | Behavior |
+| --- | --- |
+| `hist` | Save one trajectory’s history, decoded state, and fields. |
+| `erode` | Decode random initial states with no later noise. |
+| `quench` | Track preparation and offline-decoding time from a random state. |
+| `trel` | Evolve online and periodically decode a copy to estimate memory lifetime. |
+| `Ft` | Run `T` noisy rounds, then up to `2T` ideal cleanup rounds. |
+| `stats` | Estimate steady-state buffered-defect density. |
+
+For ordinary online or `Ft` evolution, persistent decoder storage is
+`M_block` and round work is `U_block`. The `trel` path additionally keeps
+an offline snapshot. Its dominant integer storage is three field arrays
+(`fields`, `new_fields`, and copied `dfields`), or `18NZ` machine
+integers, rather than the ordinary `12NZ`.
+
+#### 3.4.2 Threaded baseline
+
+`2d_windowed_simulation_thread.jl` changes trial orchestration, not the local
+decoder. It parallelizes independent trials for `erode`, `trel`, and
+`Ft`; it does not parallelize a field sweep within one trial.
+
+If `W` trial workers are active, the leading working-set and work scaling are:
+
+~~~text
+memory:  Theta(W M_block)
+wall time: ideally about serial trial work / W
+~~~
+
+`trel` gives every worker its own online state and offline snapshot. The
+current `compute` closures also retain coordinator/scratch arrays, so
+`W M_block` is the worker-dependent leading term, not an exact resident-byte
+formula.
+
+Random trajectories are not bitwise stable across thread counts because trial
+assignment and random-number consumption change. `TRIAL_PARALLEL=false`
+forces one trial worker even when Julia has multiple threads.
+
+## 4. CNOT Decoder Family
+
+### 4.1 Common experiment lifecycle
+
+All three CNOT drivers start with one control and one target logical block and
+run:
+
+~~~text
+T_PRE noisy rounds on both outputs
+one ideal X-sector CNOT event
+T_POST noisy rounds on both outputs
+up to CLEANUP_TIME synchronous ideal rounds
+logical readout of control and target
+~~~
+
+By default:
+
+~~~text
+T_PRE        = floor(T/2)
+T_POST       = T - T_PRE
 CLEANUP_TIME = 2T
-```
+T            = L
+~~~
 
-For odd `T`, the extra noisy round is after the CNOT. In `main`, `T` defaults
-to `L` for `MODE=CNOT_Ft`. The primitive script also supports explicit
-`CNOT_T_PRE` and `CNOT_T_POST`, but they must be set together and must sum to
-`TVAL`.
+For odd `T`, the extra noisy round is post-gate. The primitive driver also
+accepts paired `CNOT_T_PRE` and `CNOT_T_POST` overrides; the sheet-copy and
+block drivers use the split above. All accept a `CLEANUP_TIME` override.
 
-Existing result directories include older timing choices such as `T,0,2T` and
-`T,T,2T`. Do not compare these to the current split-timing default unless the
-timing difference is part of the comparison.
+The CNOT fidelity estimators either run exactly `SAMPS` trials or accumulate
+`ACC_ERRORS` failed trials. Trial-level threading is enabled by default.
+Each trial reports control, target, joint, and cleanup counts.
 
-### CNOT Event Rule
+For all three models:
 
-`primitive_cnot_x_sector!` mutates only the target block, except for clearing
-both `new_fields` buffers:
+~~~text
+logical_failure =
+    control_logical_failure || target_logical_failure
+~~~
 
-```text
+`cleanup_failures` is a separate statistic and is not ORed into
+`logical_failure`.
+
+### 4.2 Primitive CNOT
+
+#### 4.2.1 State ownership
+
+`2d_windowed_cnot_primitive.jl` stores two independent baseline states:
+
+~~~text
+control:
+    state_c, state_correction_c,
+    old_synds_c, new_synds_c,
+    hist_c, hist_correction_c,
+    fields_c, new_fields_c
+
+target:
+    state_t, state_correction_t,
+    old_synds_t, new_synds_t,
+    hist_t, hist_correction_t,
+    fields_t, new_fields_t
+~~~
+
+There are no structs, lineage objects, or per-gate persistent records.
+`update_two_blocks!` simply calls the legacy baseline `update!` once on the
+control and once on the target.
+
+#### 4.2.2 Gate and round updates
+
+`primitive_cnot_x_sector!` leaves the control physical state, frame, syndrome
+registers, history, and current fields unchanged. It mutates the target:
+
+~~~text
 state_t            xor= state_c
 state_correction_t xor= state_correction_c
 old_synds_t        xor= old_synds_c
 new_synds_t        xor= new_synds_c
 hist_t             xor= hist_c
 fields_t            = nonzeromin(fields_t, fields_c)
+
 new_fields_c        = 0
 new_fields_t        = 0
-```
+~~~
 
-The control block's state, correction, syndrome registers, history, and fields
-are otherwise unchanged. The driver clears both `hist_correction` buffers after
-the CNOT.
+After the gate helper returns, the trial/demo driver clears both
+`hist_correction` scratch arrays. Normal two-block updates then resume.
 
-The lossy part is the immediate merge into the target. After the gate, target
-history and fields no longer know which defects came from target history and
-which came from copied control history. The field merge keeps only nearest
-nonzero messages by component. It does not keep two independent histories or
-two independent field landscapes.
+The target retains only one Boolean history and one componentwise-minimized
+message landscape. It no longer records which residual defects or messages
+came from the pre-gate target versus the control. This provenance loss is an
+implemented fact; whether it fully explains the observed threshold loss
+remains a working hypothesis.
 
-### Trial Failure Rule
+#### 4.2.3 Readout and overhead
 
-`estimate_primitive_cnot_Ft` runs:
+Readout is local:
 
-1. `T_PRE` noisy two-block updates.
-2. One primitive CNOT event.
-3. `T_POST` noisy two-block updates.
-4. Up to `CLEANUP_TIME` ideal synchronous two-block updates.
+~~~text
+decoded_control = state_c xor state_correction_c
+decoded_target  = state_t xor state_correction_t
+~~~
 
-It then computes:
+For one trial worker:
 
-```text
-decoded_state_c = state_c xor state_correction_c
-decoded_state_t = state_t xor state_correction_t
-control_logical_failure = !detect_logical_error(decoded_state_c)
-target_logical_failure  = !detect_logical_error(decoded_state_t)
-logical_failure = control_logical_failure || target_logical_failure
-```
+~~~text
+persistent decoder state = 2 M_block
+leading field storage     = 24 N Z machine Ints
+round work                = 2 U_block
+gate work                 = Theta(NZ)
+~~~
 
-`cleanup_failures` is recorded separately as nonempty control or target history
-after cleanup. It is not explicitly ORed into `logical_failure` in the current
-implementation.
+The gate adds no persistent storage. Repeated CNOTs between a fixed set of
+blocks therefore do not increase memory with gate count. Each gate still
+performs full-array XOR, field merge, and buffer clears. With `W` trial
+workers, the leading CNOT working set is `2W M_block`, plus small decoded-state
+and orchestration buffers.
 
-Recorded CNOT metrics include:
+### 4.3 Legacy sheet-copy CNOT
 
-- `CNOT_Ft`
-- `CNOT_fail_rate`
-- `trials`
-- `logical_failures`
-- `control_logical_failures`
-- `target_logical_failures`
-- `both_logical_failures`
-- `cleanup_failures`
+#### 4.3.1 State ownership
 
-### Classical Overhead
+`2d_windowed_cnot_sheetcopy.jl` stores one complete baseline decoder per
+lineage:
 
-For two logical blocks, primitive CNOT stores exactly two baseline decoder
-states. The CNOT event itself allocates no persistent lineage state.
-
-Ignoring thread-level replication, the leading field-buffer memory is:
-
-```text
-2 blocks * 12 L^2 Z Ints
-```
-
-plus bit-packed state, syndrome, history, and correction arrays. The gate costs
-`O(L^2 Z)` time for the history and field merge. Each decoder round costs two
-baseline updates.
-
-This is the main advantage of the primitive prototype: it keeps classical space
-overhead close to baseline for the number of active logical blocks. The
-drawback is decoding performance.
-
-## Sheet-Copy CNOT Prototype
-
-### Scope
-
-`2d_windowed_cnot_sheetcopy.jl` implements an X-sector CNOT by tracking
-independent decoder-sheet lineages. It preserves the full copied control
-history and fields by deep-copying active control sheets to the target at the
-CNOT event.
-
-The key invariant is:
-
-```text
-Sheets do not exchange hist, field, correction, or syndrome data during local
-decoding. They are merged only by xor at final readout.
-```
-
-### DecoderSheet
-
-The core data type is:
-
-```text
+~~~text
 mutable struct DecoderSheet
-    block::Int
-    lineage_id::Int
-    parent_lineage_id::Union{Int,Nothing}
-    created_by_gate::Union{Int,Nothing}
-    hist::BitArray{3}
-    fields::Array{Int,5}
-    new_fields::Array{Int,5}
-    hist_correction::BitArray{4}
-    state_component::BitArray{3}
-    state_correction::BitArray{3}
-    old_synds::BitArray{2}
-    new_synds::BitArray{2}
+    block
+    lineage_id
+    parent_lineage_id
+    created_by_gate
+    hist
+    fields
+    new_fields
+    hist_correction
+    state_component
+    state_correction
+    old_synds
+    new_synds
 end
-```
+~~~
 
-`block` is `CONTROL_BLOCK = 1` or `TARGET_BLOCK = 2`.
+`state_component` is that sheet’s contribution to its assigned output
+block. Every other array has the same role and shape as its baseline
+counterpart. `initial_sheet_set` creates exactly two sheets: control lineage
+1 and target lineage 2.
 
-`state_component` is the sheet's contribution to the physical state. This is
-the sheet-copy counterpart of baseline `state`.
+A sheet is “active” if any physical, frame, syndrome, history, correction, or
+field array is nonzero. Allocated inactive sheets are not deleted and are still
+updated every round.
 
-`lineage_id` is unique. `parent_lineage_id` and `created_by_gate` record where a
-copied target sheet came from.
+#### 4.3.2 Gate and round updates
 
-`initial_sheet_set(L,Z)` creates exactly two sheets:
+At a control-to-target CNOT, `apply_cnot_x_sheetcopy!`:
 
-- control sheet, lineage 1,
-- target sheet, lineage 2.
+1. finds every active sheet currently assigned to the control;
+2. deep-copies the full `DecoderSheet`;
+3. assigns the copy to the target;
+4. gives it a fresh lineage ID and records its parent and gate;
+5. appends it without changing existing control or target sheets.
 
-`sheet_active(sheet)` returns true if any of the sheet's arrays contain
-nonzero/nonfalse data. This includes physical state, corrections, syndrome
-registers, history, and fields. A completely empty control sheet is not copied
-at a CNOT.
+Mutable-array alias checks verify that parent and child do not share storage.
+No histories or fields are merged at the gate.
 
-### Sheet-Copy CNOT Event Rule
+`update_sheets!` then calls the complete legacy `update!` on every allocated
+sheet. This has a crucial stochastic consequence: after a CNOT creates two
+target sheets, both target sheets independently sample physical noise,
+measurement noise, syndromes, histories, fields, and corrections. The model
+therefore exposes hidden component syndromes and gives one physical output
+multiple post-gate noise channels. It is retained as a legacy algorithmic
+comparison, not as the same physical model as the block implementation.
 
-`apply_cnot_x_sheetcopy!(sheets, control_block, target_block, gate_id,
-next_lineage_id)`:
+#### 4.3.3 Readout and overhead
 
-1. Finds all active sheets currently assigned to the control block.
-2. Deep-copies each active control sheet.
-3. Assigns the copy to the target block.
-4. Sets:
+Only final readout combines lineages:
 
-```text
-copied.parent_lineage_id = parent.lineage_id
-copied.lineage_id        = fresh_lineage_id
-copied.created_by_gate   = gate_id
-```
+~~~text
+decoded_state(block) =
+    xor over all sheets assigned to block of
+        (sheet.state_component xor sheet.state_correction)
+~~~
 
-5. Appends the copied sheet to `sheets`.
+Cleanup succeeds only when every sheet history is empty. Logical testing is
+then performed on the two merged output states.
 
-The parent control sheet is unchanged. Existing target sheets are unchanged.
-There is no immediate xor merge and no `nonzeromin` field merge at the gate.
+Let `S` be the total allocated sheet count, `S_c` the allocated control-sheet
+count, and `S_c_active` the number of active control sheets at a gate. Then:
 
-The code asserts that mutable arrays are not aliased between parent and copy
-when `check_aliasing=true`.
+~~~text
+persistent decoder state = S M_block + O(S) lineage metadata
+round work                = S U_block
+gate memory increase      = S_c_active M_block
+gate work                 = Theta(S + (S_c + S_c_active) NZ) in the worst case
+~~~
 
-### Sheet Updates
+The gate-time expression includes the sheet-list scan, activity scans over
+control sheets, and deep copies of active control states. Its coarse upper
+bound is `O(SNZ)`. Readout costs `Theta(SN)`; cleanup checks can scan
+`Theta(SNZ)` bits.
 
-`update_sheet!` calls the baseline `update!` on one sheet's arrays:
+For one noisy CNOT, the usual counts are:
 
-```text
-update!(sheet.state_component,
-        sheet.state_correction,
-        sheet.old_synds,
-        sheet.new_synds,
-        sheet.hist,
-        sheet.hist_correction,
-        sheet.fields,
-        sheet.new_fields,
-        r,p,q,synch,pretty)
-```
+~~~text
+before gate: 2 sheets
+after gate:  3 sheets
+target:      2 full decoder sheets
+~~~
 
-`update_sheets!` loops over all sheets and updates them independently.
+At zero noise, the empty control sheet can be inactive, in which case no copy
+is made and the count remains two.
 
-Precise implementation caveat: after a CNOT has created multiple sheets on the
-same output block, the current code applies independent physical and measurement
-noise to every sheet, because each sheet receives its own `update!` call with
-the same `p` and `q`. This is the implemented stochastic model. Do not assume it
-shares one physical-noise sample across all sheets assigned to the same block.
+If all sheets are active, a gate updates lineage counts as
 
-### Readout Merge
+~~~text
+s_target <- s_target + s_control
+s_control unchanged
+~~~
 
-`merged_decoded_state(sheets, block, L)` computes:
+Repeated gates in one direction therefore grow linearly when the control count
+is fixed. Alternating gate direction produces the Fibonacci recurrence and
+exponential-in-gate-count lineage growth. Both memory and per-round decoder
+work follow the total allocated sheet count. With `W` trial workers, the
+leading working set is `W S M_block`.
 
-```text
-decoded_state = zero
-for sheet in sheets assigned to block:
-    decoded_state xor= sheet.state_component
-    decoded_state xor= sheet.state_correction
-```
+The saved sheet-count metrics are:
 
-This is the only algebraic merge between sheets in the sheet-copy prototype.
+- `sheetcopy_final_sheet_count_mean`;
+- `sheetcopy_final_active_sheet_count_mean`;
+- `sheetcopy_max_sheet_count`;
+- `sheetcopy_max_active_sheet_count`;
+- first-trial total and active count traces.
 
-Cleanup success is:
 
-```text
-all_sheet_hists_empty(sheets)
-```
+## 5. Comparison and Evidence
 
-If cleanup succeeds, the code asserts that the merged decoded control and target
-states are syndrome-free. Logical failure is then checked on the merged decoded
-states, with the same "either block fails" rule as primitive CNOT.
+### 5.1 Overhead and information flow
 
-Like primitive CNOT, `cleanup_failures` is recorded separately and is not
-explicitly ORed into `logical_failure`.
+The following table compares one trial worker. Multiply trial-local state by
+the active worker count for threaded scans.
 
-### Sheet-Count Metrics
+| Model | Full decoder states | Post-gate target information | Persistent state | Round work | Repeated-gate growth |
+| --- | ---: | --- | --- | --- | --- |
+| Baseline | 1 | Not applicable | `M_block` | `U_block` | None |
+| Primitive | 2 | One merged history; fields compressed with `nonzeromin` | `2 M_block` | `2 U_block` | No gate-count growth |
+| Sheet-copy | `S` | Separate hidden target and copied-control decoder sheets | `S M_block + O(S)` | `S U_block` | Full-state lineage recurrence; alternating gates can grow as Fibonacci |
+| Block | 2 | One observable XOR-combined history; target fields rebuilt | `2 M_block + O(A)` metadata | `2 U_block`, independent of `A` | Decoder state fixed; stored metadata can follow the same Fibonacci recurrence |
 
-`estimate_sheetcopy_cnot_Ft` records:
+The central tradeoff is therefore:
 
-- `sheetcopy_final_sheet_count_mean`
-- `sheetcopy_final_active_sheet_count_mean`
-- `sheetcopy_max_sheet_count`
-- `sheetcopy_max_active_sheet_count`
-- `sheetcopy_first_trial_sheet_count_trace`
-- `sheetcopy_first_trial_active_sheet_count_trace`
+- primitive has fixed low overhead but irreversibly compresses pre-gate
+  histories and messages;
+- sheet-copy preserves component histories but pays one decoder and one later
+  stochastic channel per sheet;
+- block restores one physical/measurement channel per output and fixed decoder
+  state, but uses a field reset whose decoding performance is not yet
+  established.
 
-The trace note is:
+### 5.2 Empirical status
 
-```text
-init, after each pre update, after CNOT, after each post update,
-after each cleanup update
-```
+These are summaries of saved finite-size scans, not theoretical threshold
+claims. Comparisons require matched `L`, `p`, `q`, `Z`, `r`, noisy
+time, CNOT timing, and cleanup.
 
-For a single noisy CNOT between two initially empty blocks, the maximum sheet
-count is usually 3 once the control sheet is active: original control sheet,
-original target sheet, and copied control-to-target sheet. In zero noise, the
-control sheet can remain inactive at the CNOT and no copy is made, so sheet
-count remains 2.
+#### 5.2.1 Baseline memory
 
-### Classical Overhead
+`results/baseline/ft/thread_test/summary.csv` uses
+`q=p`, `r=3`, synchronous updates, logarithmic `Z`, `T=L`, and
+`2T` cleanup. Representative fidelities are:
 
-A sheet stores essentially one full baseline decoder state. If there are `S`
-live sheets, leading memory is:
-
-```text
-S * 12 L^2 Z Ints
-```
-
-plus bit-packed state, syndrome, history, and correction arrays for each sheet.
-
-For one active CNOT from control to target:
-
-- before gate: 2 sheets total,
-- after gate: 3 sheets total,
-- target block representation doubles from 1 sheet to 2 sheets.
-
-For repeated CNOTs, sheet count follows the linear update:
-
-```text
-n_target <- n_target + n_control
-n_control unchanged
-```
-
-for each CNOT. Therefore overhead can grow quickly under repeated gates. In the
-worst case, alternating CNOTs can create Fibonacci-like growth in lineage count.
-At minimum, the overhead is linear in the number of copied active sheets, not
-just in the number of logical blocks.
-
-Runtime per decoder round is also proportional to the number of sheets because
-`update_sheets!` serially calls the full baseline `update!` once per sheet
-inside each trial.
-
-## Space Overhead Summary
-
-Per baseline single-block decoder, the dominant live arrays are the two integer
-field buffers:
-
-```text
-fields + new_fields = 12 L^2 Z machine Ints
-```
-
-The main Boolean arrays total:
-
-```text
-state + state_correction + old_synds + new_synds = 6 L^2 bits
-hist + hist_correction = 4 L^2 Z bits
-```
-
-Julia `BitArray` packs these Boolean arrays, while `Array{Int}` uses machine
-integers. On a typical 64-bit Julia build, field buffers dominate memory.
-
-For a single Monte Carlo worker:
-
-- baseline one block: `1 * baseline_block_state`,
-- primitive two-block CNOT: `2 * baseline_block_state`,
-- sheet-copy one-CNOT run: `S * baseline_block_state`, usually `S=2` or `S=3`
-  for the current two-block one-gate protocol.
-
-Threaded scans multiply this by the number of active trial workers, because
-each worker allocates independent arrays.
-
-## Decoding Performance Notes
-
-These notes summarize existing scan outputs. They are not theoretical threshold
-claims.
-
-### Baseline Memory
-
-The compact baseline `Ft` table in
-`results/baseline/ft/thread_test/summary.csv` uses:
-
-```text
-qrat=1, r=3, synch=true, logZ=true, T=L, cleanup=2T
-```
-
-Representative fidelities:
-
-```text
+~~~text
 p=0.015: L=5 0.9577, L=9 0.9556, L=13 0.9575, L=19 0.9539
 p=0.016: L=5 0.9524, L=9 0.9435, L=13 0.9373, L=19 0.9313
 p=0.017: L=5 0.9390, L=9 0.9217, L=13 0.9133, L=19 0.8837
-```
+~~~
 
-The crossing trend is around `p = 0.015-0.016` for this finite-size scan and
-noise model.
+The finite-size crossing trend is near `p=0.015-0.016` for this protocol.
 
-The baseline `trel` thread-test summary shows lifetimes growing strongly with
-`L` below this region and shrinking or flattening above it. For example:
+#### 5.2.2 Primitive CNOT
 
-```text
-p=0.012: L=5 179.8, L=9 319.1, L=13 603.1, L=19 1168.2
-p=0.018: L=5 49.9,  L=9 51.5,  L=13 55.0,  L=19 53.5
-```
+`results/cnot_primitive/full_scan/T∕2_CNOT_T∕2_2T` uses matched split
+timing and otherwise comparable decoder parameters. Representative
+`CNOT_Ft` values are:
 
-### Primitive CNOT
-
-The current split-timing primitive scan
-`results/cnot_primitive/full_scan/T∕2_CNOT_T∕2_2T` uses:
-
-```text
-qrat=1, r=3, synch=true, logZ=true, T=L,
-T_PRE=floor(T/2), T_POST=ceil(T/2), cleanup=2T,
-5 repeats, ACC_ERRORS=1000 per repeat
-```
-
-Representative averaged `CNOT_Ft` values:
-
-```text
+~~~text
 p=0.012: L=5 0.9294, L=9 0.9338, L=13 0.9446, L=19 0.9559
 p=0.014: L=5 0.8894, L=9 0.8718, L=13 0.8717, L=19 0.8605
 p=0.015: L=5 0.8683, L=9 0.8291, L=13 0.8149, L=19 0.7804
-```
+~~~
 
-The threshold-like crossing is visibly below the baseline memory scan. Target
-failures dominate in the primitive data, consistent with the target carrying a
-lossy merge of control and target histories. For example, in the split-timing
-scan at `p=0.015`, aggregated over five repeats:
+The crossing-like trend is lower than the baseline. Target failures dominate
+the saved split-timing data, which is consistent with—but does not prove—the
+history-compression hypothesis.
 
-```text
-L=13: control logical failures 1132, target logical failures 4251
-L=19: control logical failures  955, target logical failures 4406
-```
+#### 5.2.3 Legacy sheet-copy CNOT
 
-### Sheet-Copy CNOT
+`results/cnot_sheetcopy/full_scan/T∕2_CNOT_T∕2_2T` contains:
 
-The current sheet-copy full scan
-`results/cnot_sheetcopy/full_scan/T∕2_CNOT_T∕2_2T` uses the same split timing
-and noise parameters as the primitive split scan. Representative averaged
-`CNOT_Ft` values:
-
-```text
+~~~text
 p=0.014: L=5 0.9147, L=9 0.9143, L=13 0.9236, L=19 0.9333
 p=0.015: L=5 0.8944, L=9 0.8814, L=13 0.8890, L=19 0.8850
 p=0.016: L=5 0.8721, L=9 0.8459, L=13 0.8340, L=19 0.8127
-```
+~~~
 
-This is closer to the baseline crossing trend than primitive CNOT, though it is
-not identical because the CNOT experiment has two blocks, one gate, and
-sheet-specific noise evolution.
+The trend is closer to the baseline than primitive CNOT. These results were
+generated by the independently noisy, independently measured sheet model.
+They are valid only as results for
+`2d_windowed_cnot_sheetcopy.jl`; they are not physical-performance evidence
+for the block implementation.
 
-The cost is visible in sheet-count metrics. In the same sheet-copy split scan:
+Representative saved sheet counts are:
 
-```text
-p=0.009, L=5:  final sheet count mean 2.744, active mean 2.677
-p=0.011, L=9:  final sheet count mean 3.000, active mean 3.000
-p=0.015, L=13: final sheet count mean 3.000, active mean 3.000
-p=0.020, L=19: final sheet count mean 3.000, active mean 3.000
-```
+~~~text
+p=0.009, L=5:  final mean 2.744, active mean 2.677
+p=0.011, L=9:  final mean 3.000, active mean 3.000
+p=0.015, L=13: final mean 3.000, active mean 3.000
+p=0.020, L=19: final mean 3.000, active mean 3.000
+~~~
 
-So for the one-CNOT protocol, sheet-copy usually pays for three full sheets
-instead of two once the control sheet is active.
+#### 5.2.4 Block CNOT
 
-## Validation Hooks
+No threshold or matched full-scan result is established for the block-level
+field-reset rule. New scans are required before claiming baseline-like or
+sheet-copy-like performance.
 
-Both CNOT files support:
+## 6. Validation and Operational Caveats
 
-```text
-MODE=CNOT_DEBUG
-```
+### 6.1 Validation and diagnostics
 
-Primitive sanity checks verify:
+The three CNOT drivers expose `MODE=CNOT_DEBUG`:
 
-- `nonzeromin`,
-- primitive target xor behavior,
-- field nonzero-min behavior,
-- `new_fields` clearing,
-- zero-noise CNOT success.
+~~~bash
+MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_primitive.jl
+MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_sheetcopy.jl
+MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_block.jl
+~~~
 
-Sheet-copy sanity checks verify:
+The sheet-copy and block commands complete successfully. Sheet-copy debug mode
+checks baseline single-sheet equivalence, deep-copy ownership, lineage IDs,
+merged readout, and zero-noise behavior.
 
-- `nonzeromin`,
-- one sheet follows the baseline decoder when no CNOT is applied,
-- copied sheets are deep copies with no mutable aliasing,
-- lineage ids remain unique,
-- merged target readout contains both target and copied control components,
-- zero-noise CNOT success.
+Primitive debug mode is intended to check XOR propagation, `nonzeromin`,
+field-buffer clearing, and zero-noise success. Its current sanity function uses
+`any(new_fields_c)` and `any(new_fields_t)` on integer arrays, however, which
+raises `TypeError: non-boolean (Int64) used in boolean context` on the current
+Julia version before the mode completes. This is a defect in the diagnostic
+assertion; it is not a passing primitive regression hook.
 
-For implementation changes, run a small deterministic/debug case before any
-large scan. Useful environment patterns:
+The block regression suite checks:
 
-```bash
-MODE=CNOT_DEBUG LVAL=3 LOGZ=false julia --threads=1 2d_windowed_cnot_primitive.jl
-MODE=CNOT_DEBUG LVAL=3 LOGZ=false julia --threads=1 2d_windowed_cnot_sheetcopy.jl
-MODE=CNOT_Ft LVAL=5 PVAL=0.0 QRAT=0 SAMPS=1 julia --threads=1 2d_windowed_cnot_sheetcopy.jl
-```
+- ideal error/frame propagation and control preservation;
+- XOR of aligned binary decoder state and target field reset;
+- no continuous post-gate propagation;
+- exactly one physical and measurement mask per block round;
+- cancellation of hidden contributions in the observable target;
+- a case where combined decoding differs from separate component decoding;
+- ancestry-count invariance in synchronous and asynchronous updates;
+- noise-free two-block cleanup and readout.
 
-## Common Pitfalls
+Run:
 
-- `detect_logical_error` returns logical success, not failure.
-- `hist` stores syndrome changes, not the current syndrome.
-- `fields == 0` means no message; use `nonzeromin` when merging fields.
-- Primitive CNOT clears `new_fields` after the gate. Do not remove this without
-  checking stale-buffer effects.
-- Sheet-copy CNOT deep-copies only active control sheets.
-- Sheet-copy readout merges sheets only at final decoded-state construction.
-- Sheet-copy repeated-CNOT overhead can grow much faster than the number of
-  logical blocks.
-- Current CNOT logical failure does not explicitly include cleanup failure,
-  though cleanup failure is recorded.
-- Current CNOT prototypes are X-sector only.
-- The CNOT files duplicate baseline decoder code. A decoder-rule bug fix may
-  need to be mirrored in the baseline, primitive, and sheet-copy files.
-- Do not compare scan outputs from different timing directories without
-  accounting for `T_PRE`, `T_POST`, and `CLEANUP_TIME`.
-- Some timing-directory names use the Unicode division slash in `T∕2`; quote
-  these paths in shell commands.
+~~~bash
+julia --startup-file=no test/runtests.jl
+julia --startup-file=no --check-bounds=yes test/runtests.jl
+~~~
+
+The block CNOT output reports ancestry counts, constant physical-block counts,
+and separate decoder/physical byte measurements. The sheet-copy output reports
+total and active sheet counts. Those diagnostics measure different ownership
+models and should not be compared as if both were physical-block counts.
+
+### 6.2 Implemented limitations and pitfalls
+
+- `detect_logical_error` returns logical success.
+- `hist` stores syndrome changes, not current syndrome values.
+- Zero-valued fields mean “absent.” Primitive uses `nonzeromin`; block resets
+  target fields instead.
+- Primitive clears both `new_fields` arrays at the gate and both
+  `hist_correction` arrays in the driver.
+- Primitive `CNOT_DEBUG` currently aborts on an integer-array `any` assertion;
+  there is no clean end-to-end primitive debug hook until that assertion is
+  fixed.
+- The serial, threaded, and primitive drivers call `Alert.alert` unconditionally
+  at normal exit. The notification backend can make an otherwise completed
+  headless run exit with an external-command error. Sheet-copy and block use
+  the opt-in, exception-catching `safe_alert` path instead.
+- Sheet-copy deep-copies only active control sheets, never prunes allocated
+  sheets, and applies later noise once per sheet.
+- Block ancestry is dynamically irrelevant but not memory-free. Its byte
+  diagnostics exclude ancestry.
+- Block asynchronous dynamics are not the legacy baseline asynchronous
+  dynamics.
+- Block `CNOT_STYLE=sheetcopy` is accepted only as a legacy alias and still
+  selects the block algorithm. The actual sheet model lives in
+  `2d_windowed_cnot_sheetcopy.jl`.
+- CNOT cleanup failure is recorded separately from logical failure.
+- The block prototype requires exactly two physical blocks and aligned
+  pre-gate buffer coordinates.
+- Saved sheet-copy scans do not validate the block field-reset policy.
+- Result directories with different `T_PRE`, `T_POST`, or cleanup schedules
+  are not directly comparable.
+- Some result paths use the Unicode division slash in `T∕2`; quote those
+  paths in shell commands.
+- Core decoder code is duplicated. Any behavioral fix must be reviewed
+  deliberately across the serial baseline, threaded baseline, primitive,
+  sheet-copy, and block files.
