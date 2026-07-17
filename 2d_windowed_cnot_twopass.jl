@@ -135,7 +135,9 @@ end
 
 function update!(
     state,state_correction,old_synds,new_synds,hist,hist_correction,
-    fields,new_fields,r,p,q,synch,pretty,
+    fields,new_fields,r,p,q,synch,pretty;
+    data_mask=nothing,measurement_mask=nothing,
+    noise_rng=Random.default_rng(),decoder_rng=Random.default_rng(),
 )
     if !synch
         error("two-pass primitive kernel supports synchronous updates only")
@@ -171,7 +173,7 @@ function update!(
             elseif fields[i,j,k,1,2] == mindist
                 hist_correction[i,j,k,1] = true
             end
-        elseif any(!iszero,@view fields[i,j,k,1:2,:]) && rand() < 0.8
+        elseif any(!iszero,@view fields[i,j,k,1:2,:]) && rand(decoder_rng) < 0.8
             positive_fields = fields[i,j,k,1:2,:][fields[i,j,k,1:2,:] .> 0]
             mindist = minimum(positive_fields)
             if fields[i,j,k,1,1] == mindist
@@ -193,14 +195,16 @@ function update!(
     end
     perform_correction!(hist,hist_correction)
 
-    if p > 0
-        state .⊻= (rand(L,L,2) .< p)
-    end
+    data_mask = resolve_twopass_channel_mask(
+        data_mask,noise_rng,(L,L,2),p,"data",
+    )
+    state .⊻= data_mask
     old_synds .= new_synds
     new_synds .= get_synds(state)
-    if q > 0
-        new_synds .⊻= (rand(L,L) .< q)
-    end
+    measurement_mask = resolve_twopass_channel_mask(
+        measurement_mask,noise_rng,(L,L),q,"measurement",
+    )
+    new_synds .⊻= measurement_mask
     rg_cycle!(hist,fields)
     hist[:,:,1] .= old_synds .⊻ new_synds
     return nothing
@@ -231,6 +235,61 @@ const MOVE_POS_X = UInt8(5)
 const JUNCTION_NONE = UInt8(0)
 const JUNCTION_PRE_CONTROL = UInt8(PRE_CONTROL)
 const JUNCTION_PRE_TARGET = UInt8(PRE_TARGET)
+
+struct TwopassRoundMasks
+    data::NTuple{2,BitArray{3}}
+    measurement::NTuple{2,BitArray{2}}
+end
+
+function TwopassRoundMasks(
+    control_data::AbstractArray{Bool,3},
+    control_measurement::AbstractArray{Bool,2},
+    target_data::AbstractArray{Bool,3},
+    target_measurement::AbstractArray{Bool,2},
+)
+    return TwopassRoundMasks(
+        (BitArray(control_data),BitArray(target_data)),
+        (BitArray(control_measurement),BitArray(target_measurement)),
+    )
+end
+
+function sample_twopass_channel_mask(rng,dims,probability)
+    if !(0 <= probability < 0.5)
+        error("decoder probabilities must satisfy 0 <= probability < 0.5")
+    elseif probability == 0
+        return falses(dims...)
+    end
+    return BitArray(rand(rng,dims...) .< probability)
+end
+
+function resolve_twopass_channel_mask(mask,rng,dims,probability,channel)
+    if mask === nothing
+        return sample_twopass_channel_mask(rng,dims,probability)
+    elseif !(mask isa AbstractArray{Bool}) || size(mask) != dims
+        error("$channel mask must have shape $dims")
+    end
+    return mask
+end
+
+function sample_twopass_round_masks(rng,L,p,q)
+    return TwopassRoundMasks(
+        sample_twopass_channel_mask(rng,(L,L,2),p),
+        sample_twopass_channel_mask(rng,(L,L),q),
+        sample_twopass_channel_mask(rng,(L,L,2),p),
+        sample_twopass_channel_mask(rng,(L,L),q),
+    )
+end
+
+function validate_twopass_round_masks(masks::TwopassRoundMasks,L)
+    for block in (CONTROL_BLOCK,TARGET_BLOCK)
+        if size(masks.data[block]) != (L,L,2)
+            error("block $block data mask must have shape ($(L),$(L),2)")
+        elseif size(masks.measurement[block]) != (L,L)
+            error("block $block measurement mask must have shape ($(L),$(L))")
+        end
+    end
+    return masks
+end
 
 mutable struct TwopassPhysicalBlock
     block::Int
@@ -263,6 +322,7 @@ mutable struct TwopassTargetHistory
     route_junction_fields::Array{Int,4}
     route_new_junction_fields::Array{Int,4}
     junction_proposals::Array{UInt8,2}
+    retirements::BitArray{3}
     residual::TwopassHistory
     junction_depth::Int
     retired_defects::Int
@@ -322,6 +382,7 @@ function make_twopass_target_history(L,Z)
         zeros(Int,L,L,Z,2),
         zeros(Int,L,L,Z,2),
         zeros(UInt8,L,L),
+        falses(L,L,TWOPASS_STREAM_COUNT),
         make_twopass_history(L,Z),
         0,
         0,
@@ -373,7 +434,11 @@ function select_twopass_move(temporal,neg_x,neg_y,pos_y,pos_x,spatial_weight,tem
     return selected
 end
 
-function update_twopass_live_block!(block::TwopassPhysicalBlock,hist,proposals,fields,new_fields,r,p,q)
+function update_twopass_live_block!(
+    block::TwopassPhysicalBlock,hist,proposals,fields,new_fields,r,p,q;
+    data_mask=nothing,measurement_mask=nothing,
+    noise_rng=Random.default_rng(),decoder_rng=Random.default_rng(),
+)
     update!(
         block.errors,
         block.frame,
@@ -383,7 +448,11 @@ function update_twopass_live_block!(block::TwopassPhysicalBlock,hist,proposals,f
         proposals,
         fields,
         new_fields,
-        r,p,q,true,false,
+        r,p,q,true,false;
+        data_mask=data_mask,
+        measurement_mask=measurement_mask,
+        noise_rng=noise_rng,
+        decoder_rng=decoder_rng,
     )
     block.noise_rounds += 1
     block.measurement_rounds += 1
@@ -425,6 +494,7 @@ function apply_cnot_x_twopass!(state::TwopassCNOTState,control_block=CONTROL_BLO
     histories.route_junction_fields .= 0
     histories.route_new_junction_fields .= 0
     histories.junction_proposals .= JUNCTION_NONE
+    histories.retirements .= false
     histories.residual.hist .= false
     histories.residual.fields .= 0
     histories.residual.new_fields .= 0
@@ -495,13 +565,43 @@ function update_twopass_fields!(target::TwopassTargetHistory,r)
     return nothing
 end
 
-function retire_labeled_backwall!(target::TwopassTargetHistory)
+function twopass_lane_proposal_touches(target::TwopassTargetHistory,i,j,k,stream)
+    L,_,Z,_ = size(target.hist)
+    ind(index) = mod1(index,L)
+    proposals = lane_proposals(target,stream)
+    return proposals[i,j,k,1] || proposals[ind(i-1),j,k,1] ||
+           proposals[i,j,k,2] || proposals[i,ind(j-1),k,2] ||
+           (k > 1 && proposals[i,j,k-1,3]) ||
+           (k < Z && proposals[i,j,k,3])
+end
+
+function twopass_junction_proposal_touches(target::TwopassTargetHistory,i,j,k,stream)
+    _,_,Z,_ = size(target.hist)
+    g = target.junction_depth
+    return 1 <= g < Z && k == g + 1 &&
+           target.junction_proposals[i,j] == UInt8(stream)
+end
+
+function select_twopass_retirements!(target::TwopassTargetHistory)
+    L,_,Z,_ = size(target.hist)
+    target.retirements .= false
+    for stream in 1:TWOPASS_STREAM_COUNT, i in 1:L, j in 1:L
+        if target.hist[i,j,Z,stream] &&
+           !twopass_lane_proposal_touches(target,i,j,Z,stream) &&
+           !twopass_junction_proposal_touches(target,i,j,Z,stream)
+            target.retirements[i,j,stream] = true
+        end
+    end
+    return count(target.retirements)
+end
+
+function commit_twopass_retirements!(target::TwopassTargetHistory)
     L,_,Z,_ = size(target.hist)
     affected_streams = falses(TWOPASS_STREAM_COUNT)
     transferred = 0
     for stream in 1:TWOPASS_STREAM_COUNT, i in 1:L, j in 1:L
-        if target.hist[i,j,Z,stream]
-            target.hist[i,j,Z,stream] = false
+        if target.retirements[i,j,stream]
+            target.hist[i,j,Z,stream] ⊻= true
             target.residual.hist[i,j,Z] ⊻= true
             affected_streams[stream] = true
             transferred += 1
@@ -522,7 +622,13 @@ function retire_labeled_backwall!(target::TwopassTargetHistory)
         target.route_new_junction_fields .= 0
         target.retired_defects += transferred
     end
+    target.retirements .= false
     return transferred
+end
+
+function retire_labeled_backwall!(target::TwopassTargetHistory)
+    select_twopass_retirements!(target)
+    return commit_twopass_retirements!(target)
 end
 
 function twopass_temporal_message(target::TwopassTargetHistory,i,j,k,stream)
@@ -722,7 +828,9 @@ function route_twopass_directions!(target::TwopassTargetHistory,r=1)
     return nothing
 end
 
-function select_residual_proposals!(target::TwopassTargetHistory)
+function select_residual_proposals!(
+    target::TwopassTargetHistory;decoder_rng=Random.default_rng(),
+)
     residual = target.residual
     L,_,Z = size(residual.hist)
     ind(i) = mod1(i,L)
@@ -744,7 +852,8 @@ function select_residual_proposals!(target::TwopassTargetHistory)
             elseif residual.fields[i,j,k,1,2] == mindist
                 residual.proposals[i,j,k,1] = true
             end
-        elseif k == Z && any(!iszero,@view residual.fields[i,j,k,1:2,:]) && rand() < 0.8
+        elseif k == Z && any(!iszero,@view residual.fields[i,j,k,1:2,:]) &&
+               rand(decoder_rng) < 0.8
             mindist = minimum(residual.fields[i,j,k,1:2,:][residual.fields[i,j,k,1:2,:] .> 0])
             if residual.fields[i,j,k,1,1] == mindist
                 residual.proposals[ind(i-1),j,k,1] = true
@@ -760,10 +869,17 @@ function select_residual_proposals!(target::TwopassTargetHistory)
     return nothing
 end
 
-function apply_twopass_proposals!(target::TwopassTargetHistory,target_frame)
+function apply_twopass_proposals!(
+    target::TwopassTargetHistory,target_frame;
+    stream_order=1:TWOPASS_STREAM_COUNT,
+)
     L,_,Z,_ = size(target.hist)
+    ordered_streams = collect(stream_order)
+    if sort(ordered_streams) != collect(1:TWOPASS_STREAM_COUNT)
+        error("stream_order must be a permutation of 1:$TWOPASS_STREAM_COUNT")
+    end
 
-    for stream in 1:TWOPASS_STREAM_COUNT
+    for stream in ordered_streams
         proposals = lane_proposals(target,stream)
         for i in 1:L, j in 1:L, axis in 1:2
             target_frame[i,j,axis] ⊻= reduce(⊻,@view proposals[i,j,:,axis])
@@ -787,6 +903,7 @@ function apply_twopass_proposals!(target::TwopassTargetHistory,target_frame)
             end
         end
     end
+    commit_twopass_retirements!(target)
     return nothing
 end
 
@@ -820,7 +937,11 @@ function age_twopass_target_histories!(target::TwopassTargetHistory,new_event)
     return nothing
 end
 
-function update_twopass_target!(state::TwopassCNOTState,r,p,q)
+function update_twopass_target!(
+    state::TwopassCNOTState,r,p,q;
+    data_mask=nothing,measurement_mask=nothing,
+    noise_rng=Random.default_rng(),decoder_rng=Random.default_rng(),
+)
     if !state.cnot_applied
         error("target junction update requires an applied CNOT")
     end
@@ -834,18 +955,21 @@ function update_twopass_target!(state::TwopassCNOTState,r,p,q)
     # proposals have been recorded.
     select_twopass_directions!(target,state.spatial_weight,state.temporal_weight)
     route_twopass_directions!(target,r)
-    select_residual_proposals!(target)
+    select_residual_proposals!(target;decoder_rng=decoder_rng)
+    select_twopass_retirements!(target)
     apply_twopass_proposals!(target,target_block.frame)
-    retire_labeled_backwall!(target)
 
-    if p > 0
-        target_block.errors .⊻= (rand(size(target_block.errors)) .< p)
-    end
+    data_mask = resolve_twopass_channel_mask(
+        data_mask,noise_rng,size(target_block.errors),p,"target data",
+    )
+    target_block.errors .⊻= data_mask
     target_block.old_synds .= target_block.new_synds
     target_block.new_synds .= get_synds(target_block.errors)
-    if q > 0
-        target_block.new_synds .⊻= (rand(size(target_block.new_synds)) .< q)
-    end
+    measurement_mask = resolve_twopass_channel_mask(
+        measurement_mask,noise_rng,size(target_block.new_synds),q,
+        "target measurement",
+    )
+    target_block.new_synds .⊻= measurement_mask
     target_block.noise_rounds += 1
     target_block.measurement_rounds += 1
 
@@ -854,10 +978,22 @@ function update_twopass_target!(state::TwopassCNOTState,r,p,q)
     return nothing
 end
 
-function update_twopass_round!(state::TwopassCNOTState,r,p,q;pretty=false)
+function update_twopass_round!(
+    state::TwopassCNOTState,r,p,q;
+    pretty=false,masks=nothing,
+    noise_rng=Random.default_rng(),decoder_rng=nothing,
+)
     if pretty
         error("two-pass CNOT does not implement pretty/visualization updates")
     end
+    L = size(state.blocks[CONTROL_BLOCK].errors,1)
+    round_masks = masks === nothing ?
+        sample_twopass_round_masks(noise_rng,L,p,q) :
+        validate_twopass_round_masks(masks,L)
+    if decoder_rng === nothing
+        decoder_rng = Random.Xoshiro(rand(noise_rng,UInt64))
+    end
+
     control = state.blocks[CONTROL_BLOCK]
     update_twopass_live_block!(
         control,
@@ -865,11 +1001,21 @@ function update_twopass_round!(state::TwopassCNOTState,r,p,q;pretty=false)
         state.control_history.proposals,
         state.control_history.fields,
         state.control_history.new_fields,
-        r,p,q,
+        r,p,q;
+        data_mask=round_masks.data[CONTROL_BLOCK],
+        measurement_mask=round_masks.measurement[CONTROL_BLOCK],
+        noise_rng=noise_rng,
+        decoder_rng=decoder_rng,
     )
 
     if state.cnot_applied
-        update_twopass_target!(state,r,p,q)
+        update_twopass_target!(
+            state,r,p,q;
+            data_mask=round_masks.data[TARGET_BLOCK],
+            measurement_mask=round_masks.measurement[TARGET_BLOCK],
+            noise_rng=noise_rng,
+            decoder_rng=decoder_rng,
+        )
     else
         target = state.blocks[TARGET_BLOCK]
         history = state.target_history
@@ -879,10 +1025,14 @@ function update_twopass_round!(state::TwopassCNOTState,r,p,q;pretty=false)
             lane_proposals(history,PRE_TARGET),
             lane_fields(history,PRE_TARGET),
             lane_new_fields(history,PRE_TARGET),
-            r,p,q,
+            r,p,q;
+            data_mask=round_masks.data[TARGET_BLOCK],
+            measurement_mask=round_masks.measurement[TARGET_BLOCK],
+            noise_rng=noise_rng,
+            decoder_rng=decoder_rng,
         )
     end
-    return nothing
+    return round_masks
 end
 
 function all_twopass_histories_empty(state::TwopassCNOTState)
