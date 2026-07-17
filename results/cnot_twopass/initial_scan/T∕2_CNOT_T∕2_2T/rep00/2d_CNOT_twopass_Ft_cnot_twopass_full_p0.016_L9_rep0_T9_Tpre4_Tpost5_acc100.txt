@@ -1,0 +1,24 @@
+### data ###
+CNOT_Ft = 0.6168582375478927
+CNOT_fail_rate = 0.3831417624521073
+both_logical_failures = 4
+cleanup_failures = 0
+control_logical_failures = 16
+logical_failures = 100
+target_logical_failures = 88
+trials = 261
+twopass_physical_block_count = 2
+twopass_retired_defects = 436
+twopass_retired_defects_mean = 1.6704980842911878
+twopass_target_stream_count = 3
+
+### params ###
+L = 9
+Z = 6
+p = 0.016
+q = 0.016
+r = 3
+T_PRE = 4
+T_POST = 5
+CLEANUP_TIME = 18
+SYNCH = true
