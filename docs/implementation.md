@@ -1,6 +1,6 @@
 # mp-decoder Implementation Documentation
 
-Last updated: 2026-07-15
+Last updated: 2026-07-17
 
 This document describes the implemented Julia behavior, with emphasis on state
 ownership, update order, and classical overhead. The Markdown paper notes
@@ -43,6 +43,15 @@ The repository has two decoder-code lineages:
            block and separate pre-/post-gate decoder histories.
          - Routes recovery contributions with `applies_to::BitVector` rather
            than deep-copying physical sheets.
+
+      4. Two-pass causal junction: `2d_windowed_cnot_twopass.jl`
+
+         - Keeps two physical blocks, a continuous control decoder, and three
+           labeled target-output history streams connected at the CNOT.
+         - Uses deterministic two-stage direction selection/routing and a
+           primitive history only for finite back-wall retirement.
+         - Owns the required synchronous baseline kernel copied from the
+           primitive lineage; it imports no other CNOT driver.
 
 2. Block-level fork
 
@@ -346,8 +355,8 @@ forces one trial worker even when Julia has multiple threads.
 
 ### 4.1 Common experiment lifecycle
 
-All three CNOT drivers start with one control and one target logical block and
-run:
+The CNOT fixed-time drivers start with one control and one target logical block
+and run:
 
 ~~~text
 T_PRE noisy rounds on both outputs
@@ -374,7 +383,7 @@ The CNOT fidelity estimators either run exactly `SAMPS` trials or accumulate
 `ACC_ERRORS` failed trials. Trial-level threading is enabled by default.
 Each trial reports control, target, joint, and cleanup counts.
 
-For all three models:
+For all current CNOT models:
 
 ~~~text
 logical_failure =
@@ -632,6 +641,165 @@ machine integers before deletion. This version has no threshold evidence and
 does not yet provide a repeated-gate driver; `applies_to` is present to support
 that later extension without a deep-copied lineage tree.
 
+### 4.4 Two-pass causal-junction CNOT
+
+#### 4.4.1 State ownership
+
+`2d_windowed_cnot_twopass.jl` implements one synchronous ideal X-sector CNOT.
+It is a standalone derivative of the primitive CNOT lineage and embeds only
+the required synchronous baseline memory-decoder helpers. Its CNOT state is
+separate:
+
+~~~text
+TwopassPhysicalBlock:
+    errors, frame, old_synds, new_synds,
+    noise_rounds, measurement_rounds
+
+TwopassCNOTState:
+    two physical blocks
+    one continuous control TwopassHistory
+    one TwopassTargetHistory
+    cnot_applied
+    fixed spatial and temporal decoding weights
+~~~
+
+The target history owns three fixed Boolean histories and independent field
+banks:
+
+~~~text
+PRE_CONTROL = stored control observations before the gate
+PRE_TARGET  = target observations before the gate
+POST_TARGET = observable target observations after the gate
+~~~
+
+These are observable spacetime-segment labels, not hidden physical fault
+labels. The target also owns a primitive retirement history, two branch-message
+buffers, proposal arrays, and the moving junction depth. Every target spatial
+proposal updates the one physical target frame. Different labeled histories
+never annihilate directly.
+
+#### 4.4.2 Gate and physical channels
+
+Before the gate, the control and target use the ordinary baseline `update!`;
+the target data is stored in `PRE_TARGET`. At the gate:
+
+~~~text
+errors[target]     xor= errors[control]
+frame[target]      xor= frame[control]
+old_synds[target]  xor= old_synds[control]
+new_synds[target]  xor= new_synds[control]
+~~~
+
+The continuous control history is unchanged. Its history and current fields
+are copied once into `PRE_CONTROL`, the existing `PRE_TARGET` history is
+retained, and `POST_TARGET` is cleared. Scratch fields, proposals, junction
+messages, and the retirement history are cleared. The arrays do not alias the
+control decoder. No noise, measurement, or syndrome event occurs at the gate.
+
+After the gate, `update_twopass_round!` calls the ordinary control update once
+and the custom target update once. Each physical block therefore receives one
+Bernoulli-`p` edge mask and one Bernoulli-`q` measurement mask per round.
+Only the observed target syndrome change is inserted into `POST_TARGET`;
+`PRE_CONTROL`, `PRE_TARGET`, and the retirement history receive empty fronts.
+Post-CNOT control noise is not supplied to target inference.
+
+#### 4.4.3 Two-pass labeled feedback
+
+The target update is synchronous and ordered as follows:
+
+1. Run `r` inherited field sweeps independently on each labeled history and
+   the retirement history. Junction messages are computed from the same
+   pre-sweep lane fields, preserving global synchronous propagation.
+2. First pass: store one preferred direction for every active labeled defect
+   from the frozen histories.
+3. Second pass: seed a scratch three-stream field bank from the persistent
+   pass-one messages, run `r` synchronous sweeps on the frozen current labeled
+   histories, route only the axis selected in pass one, and record the link
+   without changing a history. Seeding preserves Lake-like message reach beyond
+   one round's `r` sweeps. Junction branches are selected before ordinary
+   proposals, and a directly selected pre-gate endpoint is skipped as a source.
+4. Select primitive-retirement proposals and apply every proposal
+   synchronously. Spatial proposal parity is XORed into the target frame;
+   temporal links change only histories.
+5. XOR every labeled defect remaining on the back wall into the primitive
+   retirement history.
+6. Apply target physical and measurement noise once, cycle every target
+   history once, insert the new event only into `POST_TARGET`, and advance the
+   junction depth.
+
+Zero message means no candidate: the defect makes no corrective move and ages
+normally. For positive equal minima, the immediate priority is
+
+~~~text
+temporal, -x, -y, +y, +x
+~~~
+
+There is no reciprocal-match requirement, confidence delay, or retirement for
+an ordinary tie. A defect proposes at most one adjacent edge per round. Labeled
+back-wall motion is deterministic; the primitive retirement history retains
+the inherited raw-distance feedback and `0.8` stochastic back-wall rule.
+
+The stored nominal weights are
+
+~~~text
+w_p = log((1-p)/p)
+w_q = log((1-q)/q)
+~~~
+
+with infinite weight at probability zero. They remain fixed during noiseless
+cleanup. The implementation multiplies an inherited integer directional
+message by the corresponding axis weight at selection time. It does not
+replace the inherited message kernel with exact edge-by-edge anisotropic
+propagation.
+
+Spatial and temporal movement stays within one stream except at the moving
+CNOT junction, where a newer `POST_TARGET` defect may enter either
+`PRE_CONTROL` or `PRE_TARGET`. A direct `PRE_CONTROL <-> PRE_TARGET` link is
+forbidden. Equal branch costs select `PRE_CONTROL` before `PRE_TARGET`. Once a
+post-gate defect crosses, it belongs to only the selected pre-gate stream.
+
+#### 4.4.4 Retirement, cleanup, readout, and interface
+
+The primitive retirement history is not an ordinary ambiguity fallback. After
+labeled proposals, every labeled defect still at `k=Z` is transferred. This
+allows a valid labeled spatial or capped-junction match to resolve first.
+Transfer clears the labeled bit and XORs the same coordinate into the
+retirement history; it is never copied. The retirement history receives no
+direct syndrome stream.
+
+Readout is local:
+
+~~~text
+decoded_control = errors[control] xor frame[control]
+decoded_target  = errors[target]  xor frame[target]
+~~~
+
+Cleanup uses physical `p=q=0` and succeeds only when the control history, all
+three labeled target histories, and the retirement history are empty. Cleanup
+failure is recorded separately from logical failure. The logical trial fails
+if either decoded output has nontrivial winding.
+
+The public estimator is `estimate_twopass_cnot_Ft`, with the same timing and
+fixed-sample/accumulate-failures arguments as the primitive estimator. The
+guarded driver accepts `MODE=CNOT_Ft` and `MODE=CNOT_DEBUG`; it rejects
+`SYNCH=false`, pretty updates, and a second CNOT. `OUTPUT_FILE` is optional; if
+absent, `CNOT_Ft` prints results without writing a file.
+
+#### 4.4.5 Overhead and implemented limits
+
+The arrays are allocated at initialization and do not grow with elapsed time.
+The control, three persistent target histories, and retirement history use five
+field pairs, or `60NZ` machine integers. The reusable three-stream second-pass
+field pair adds `36NZ`; persistent and second-pass junction buffers add `8NZ`.
+Leading integer storage is therefore `104NZ` per trial, plus Boolean histories,
+proposals, physical arrays, and container overhead. Post-gate round work remains
+`Theta(rNZ)` with a larger constant from the persistent and fresh routing
+sweeps.
+
+The driver implements only two blocks and one gate, so constant overhead under
+repeated CNOTs is not established. There is no threshold scan, visualization,
+asynchronous path, Z sector, gate noise, or general circuit interface.
+
 
 ## 5. Comparison and Evidence
 
@@ -646,6 +814,7 @@ the active worker count for threaded scans.
 | Primitive | 2 | One merged history; fields compressed with `nonzeromin` | `2 M_block` | `2 U_block` | No gate-count growth |
 | Sheet-copy | `S` | Separate hidden target and copied-control decoder sheets | `S M_block + O(S)` | `S U_block` | Full-state lineage recurrence; alternating gates can grow as Fibonacci |
 | Snapshot | 2 physical blocks, up to 4 histories | Separate pre-/post-gate histories; only observable blocks are measured | Up to about `4 M_block` before old-history deletion | Up to `4 U_block`, falling as old histories empty | Repeated driver not implemented; `applies_to` avoids deep-copy routing |
+| Two-pass | 2 physical blocks, 1 control history, 3 target streams, 1 retirement history | Separate causal streams joined by label-aware temporal edges | `104NZ` leading integer words plus Boolean state | `Theta(rNZ)` with persistent and fresh route sweeps | Repeated driver not implemented; fixed one-gate allocation |
 | Block | 2 | One observable XOR-combined history; target fields rebuilt | `2 M_block + O(A)` metadata | `2 U_block`, independent of `A` | Decoder state fixed; stored metadata can follow the same Fibonacci recurrence |
 
 The central tradeoff is therefore:
@@ -657,6 +826,9 @@ The central tradeoff is therefore:
 - snapshot preserves separate pre-/post-gate histories while using only two
   physical channels, but can temporarily require four decoder histories and
   forbids matching between histories;
+- two-pass uses the same two physical channels, retains separate target causal
+  streams, and permits only the two target-output CNOT-junction paths; its
+  performance and larger constant field cost are not yet characterized;
 - block restores one physical/measurement channel per output and fixed decoder
   state, but uses a field reset whose decoding performance is not yet
   established.
@@ -736,6 +908,19 @@ available. Legacy sheet-copy scan values cannot be transferred because the
 snapshot model has one physical and measurement channel per output rather than
 one channel per hidden sheet.
 
+#### 5.2.6 Two-pass CNOT
+
+The deterministic suite, bounds-checked suite, zero-noise debug path, and a
+small noisy fixed-sample run pass. A seeded one-round parity check against the
+unchanged primitive memory kernel and a full pre-gate/gate/post-gate/cleanup
+extraction-parity check both match every state array and the next RNG draw. No
+matched finite-size scan or threshold estimate exists. The intended comparison
+is paired trials against primitive
+for measurement-only, storage-only, and `p=q` noise, followed by the matched
+`L=5,7,9,13,19` protocol. Improved storage-error attribution without loss of
+the primitive crossing remains a working hypothesis, not an established
+result.
+
 ## 6. Validation and Operational Caveats
 
 ### 6.1 Validation and diagnostics
@@ -748,6 +933,8 @@ MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_shee
 MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_block.jl
 MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 CLEANUP_TIME=4 SYNCH=true \
     TRIAL_PARALLEL=false julia --threads=1 2d_windowed_cnot_snapshot.jl
+MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 CLEANUP_TIME=4 SYNCH=true \
+    TRIAL_PARALLEL=false julia --threads=1 2d_windowed_cnot_twopass.jl
 ~~~
 
 The sheet-copy and block commands complete successfully. Sheet-copy debug mode
@@ -761,6 +948,19 @@ suite also runs a small noisy sample:
 
 ~~~bash
 julia --startup-file=no test/snapshot_runtests.jl
+~~~
+
+Two-pass debug mode checks the ideal error/frame map, non-aliasing of copied
+pre-control evidence, and zero-noise cleanup. Its focused suite covers field
+priority, standalone loading without snapshot symbols, stored weights,
+no-candidate aging, second-pass recomputation, globally synchronous junction
+messages, physical cross-gate measurement-event closure, labeled routing,
+junction branch priority, physical-channel ownership, one-edge locality,
+back-wall retirement, and exact threaded fixed-sample accounting:
+
+~~~bash
+julia --startup-file=no test/twopass_runtests.jl
+julia --startup-file=no --check-bounds=yes test/twopass_runtests.jl
 ~~~
 
 Primitive debug mode is intended to check XOR propagation, `nonzeromin`,
@@ -816,6 +1016,14 @@ models and should not be compared as if both were physical-block counts.
   with other old or live histories; the performance cost is unknown.
 - Snapshot `applies_to` implements future correction routing, but the current
   driver rejects a second CNOT.
+- Two-pass supports one ideal synchronous X-sector CNOT and two blocks. It has
+  no asynchronous, repeated-gate, visualization, or threshold-scan result.
+- Two-pass ordinary bulk ties move immediately by fixed priority; labeled
+  defects enter the primitive retirement history only at the finite back wall.
+- Two-pass applies `w_p` or `w_q` to inherited integer directional distances;
+  this is not exact edge-weighted anisotropic message propagation.
+- Two-pass embeds a synchronous-only copy of the primitive/baseline memory
+  kernel. Later kernel fixes must therefore be reviewed explicitly here too.
 - Block ancestry is dynamically irrelevant but not memory-free. Its byte
   diagnostics exclude ancestry.
 - Block asynchronous dynamics are not the legacy baseline asynchronous
@@ -833,4 +1041,4 @@ models and should not be compared as if both were physical-block counts.
   paths in shell commands.
 - Core decoder code is duplicated. Any behavioral fix must be reviewed
   deliberately across the serial baseline, threaded baseline, primitive,
-  sheet-copy, snapshot, and block files.
+  sheet-copy, snapshot, two-pass, and block files.
