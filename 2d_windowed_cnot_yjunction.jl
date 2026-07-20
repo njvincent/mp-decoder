@@ -1017,15 +1017,20 @@ end
 parse_bool(value) = lowercase(value) in ("1","true","yes","on")
 
 function write_yjunction_output(path,params,data)
-    open(path,"w") do io
-        for key in sort!(collect(keys(params)))
-            println(io,key," = ",repr(params[key]))
-        end
+    output_path = abspath(path)
+    mkpath(dirname(output_path))
+    open(output_path,"w") do io
+        println(io,"### data ###")
         for key in sort!(collect(keys(data)))
             println(io,key," = ",repr(data[key]))
         end
+        println(io)
+        println(io,"### params ###")
+        for key in sort!(collect(keys(params)))
+            println(io,key," = ",repr(params[key]))
+        end
     end
-    return nothing
+    return output_path
 end
 
 function main()
@@ -1049,7 +1054,7 @@ function main()
         error("CNOT_T_PRE + CNOT_T_POST must equal TVAL")
     end
     cleanup_time = parse(Int,get(ENV,"CLEANUP_TIME",string(default_cleanup)))
-    fixed_samps = parse(Int,get(ENV,"CNOT_SAMPS","0"))
+    fixed_samps = parse(Int,get(ENV,"SAMPS",get(ENV,"CNOT_SAMPS","0")))
     acc_err = parse(Int,get(ENV,"ACC_ERRORS","100"))
     trial_parallel = parse_bool(get(ENV,"TRIAL_PARALLEL","true"))
     verbose = parse_bool(get(ENV,"VERBOSE","false"))
@@ -1072,18 +1077,25 @@ function main()
         "Z" => Z,
         "p" => p,
         "q" => q,
+        "QRAT" => qrat,
         "r" => r,
         "SYNCH" => synch,
+        "LOGZ" => logz,
+        "T" => total_time,
         "T_PRE" => T_PRE,
         "T_POST" => T_POST,
         "CLEANUP_TIME" => cleanup_time,
+        "SAMPS" => fixed_samps,
+        "ACC_ERRORS" => acc_err,
+        "TRIAL_PARALLEL" => trial_parallel,
     )
     for key in sort!(collect(keys(data)))
         println(key," = ",data[key])
     end
     output_file = get(ENV,"OUTPUT_FILE","")
     if !isempty(output_file)
-        write_yjunction_output(output_file,params,data)
+        written_path = write_yjunction_output(output_file,params,data)
+        println("wrote Y-junction CNOT result to ",written_path)
     end
     return nothing
 end
