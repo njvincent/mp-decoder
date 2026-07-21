@@ -53,6 +53,15 @@ The repository has two decoder-code lineages:
          - Owns the required synchronous baseline kernel copied from the
            primitive lineage; it imports no other CNOT driver.
 
+      5. Moving Y-junction: `2d_windowed_cnot_yjunction.jl`
+
+         - Keeps two pre-gate target branches only above a moving CNOT
+           interface and one unlabeled post-gate target lane below it.
+         - Propagates messages bidirectionally across the branched local graph,
+           while every defect remains in exactly one lane.
+         - XOR-collapses the pre-gate branches into the ordinary target back
+           wall after one buffer depth, returning to two decoder lanes.
+
 2. Block-level fork
 
    1. Block CNOT driver: `2d_windowed_cnot_block.jl`
@@ -661,6 +670,9 @@ TwopassCNOTState:
     one TwopassTargetHistory
     cnot_applied
     fixed spatial and temporal decoding weights
+
+TwopassRoundMasks:
+    one data mask and one measurement mask per physical block
 ~~~
 
 The target history owns three fixed Boolean histories and independent field
@@ -674,9 +686,9 @@ POST_TARGET = observable target observations after the gate
 
 These are observable spacetime-segment labels, not hidden physical fault
 labels. The target also owns a primitive retirement history, two branch-message
-buffers, proposal arrays, and the moving junction depth. Every target spatial
-proposal updates the one physical target frame. Different labeled histories
-never annihilate directly.
+buffers, proposal arrays, a frozen `L x L x 3` retirement mask, and the moving
+junction depth. Every target spatial proposal updates the one physical target
+frame. Different labeled histories never annihilate directly.
 
 #### 4.4.2 Gate and physical channels
 
@@ -696,9 +708,14 @@ retained, and `POST_TARGET` is cleared. Scratch fields, proposals, junction
 messages, and the retirement history are cleared. The arrays do not alias the
 control decoder. No noise, measurement, or syndrome event occurs at the gate.
 
-After the gate, `update_twopass_round!` calls the ordinary control update once
-and the custom target update once. Each physical block therefore receives one
-Bernoulli-`p` edge mask and one Bernoulli-`q` measurement mask per round.
+After the gate, `update_twopass_round!` pre-samples one Bernoulli-`p` edge mask
+and one Bernoulli-`q` measurement mask for each physical block, then calls the
+ordinary control update once and the custom target update once. The masks are
+applied at the inherited physical-noise stage. Callers may instead pass an
+explicit `TwopassRoundMasks` and separate noise/decoder RNGs; this is the paired
+primitive-comparison interface. If `decoder_rng` is omitted, the round derives
+a distinct `Xoshiro` from `noise_rng` only after sampling the four masks.
+Decoder back-wall draws therefore cannot change the physical noise tape.
 Only the observed target syndrome change is inserted into `POST_TARGET`;
 `PRE_CONTROL`, `PRE_TARGET`, and the retirement history receive empty fronts.
 Post-CNOT control noise is not supplied to target inference.
@@ -718,14 +735,15 @@ The target update is synchronous and ordered as follows:
    without changing a history. Seeding preserves Lake-like message reach beyond
    one round's `r` sweeps. Junction branches are selected before ordinary
    proposals, and a directly selected pre-gate endpoint is skipped as a source.
-4. Select primitive-retirement proposals and apply every proposal
-   synchronously. Spatial proposal parity is XORed into the target frame;
-   temporal links change only histories.
-5. XOR every labeled defect remaining on the back wall into the primitive
-   retirement history.
-6. Apply target physical and measurement noise once, cycle every target
-   history once, insert the new event only into `POST_TARGET`, and advance the
-   junction depth.
+4. Select primitive-retirement proposals. From the same frozen histories,
+   select a labeled back-wall retirement only when no same-stream or junction
+   proposal touches the defect. Incidence includes incoming edges.
+5. Apply every labeled, junction, primitive, and retirement proposal in one
+   XOR commit. Spatial proposal parity is XORed into the target frame;
+   temporal, junction, and retirement operations change only histories.
+6. Apply the pre-sampled target physical and measurement masks once, cycle
+   every target history once, insert the new event only into `POST_TARGET`, and
+   advance the junction depth.
 
 Zero message means no candidate: the defect makes no corrective move and ages
 normally. For positive equal minima, the immediate priority is
@@ -736,8 +754,9 @@ temporal, -x, -y, +y, +x
 
 There is no reciprocal-match requirement, confidence delay, or retirement for
 an ordinary tie. A defect proposes at most one adjacent edge per round. Labeled
-back-wall motion is deterministic; the primitive retirement history retains
-the inherited raw-distance feedback and `0.8` stochastic back-wall rule.
+legal back-wall motion is deterministic; a wall defect with no legal incident
+proposal retires. The primitive retirement history retains the inherited
+raw-distance feedback and `0.8` stochastic back-wall rule.
 
 The stored nominal weights are
 
@@ -760,12 +779,15 @@ post-gate defect crosses, it belongs to only the selected pre-gate stream.
 
 #### 4.4.4 Retirement, cleanup, readout, and interface
 
-The primitive retirement history is not an ordinary ambiguity fallback. After
-labeled proposals, every labeled defect still at `k=Z` is transferred. This
-allows a valid labeled spatial or capped-junction match to resolve first.
-Transfer clears the labeled bit and XORs the same coordinate into the
-retirement history; it is never copied. The retirement history receives no
-direct syndrome stream.
+The primitive retirement history is not an ordinary ambiguity fallback. For a
+frozen labeled back-wall defect `H[i,j,Z,s]`, retirement is selected iff no
+selected same-stream or junction edge is incident on that site. The XOR commit
+clears the labeled bit and toggles the same coordinate in the retirement
+history; it is never copied. Consequently, an occupied endpoint touched by an
+incoming lane or capped-junction proposal resolves before retirement, a newly
+arriving back-wall defect remains labeled until the next round, and two labels
+retiring at one coordinate cancel in the primitive history. The retirement
+history receives no direct syndrome stream.
 
 Readout is local:
 
@@ -792,13 +814,131 @@ The control, three persistent target histories, and retirement history use five
 field pairs, or `60NZ` machine integers. The reusable three-stream second-pass
 field pair adds `36NZ`; persistent and second-pass junction buffers add `8NZ`.
 Leading integer storage is therefore `104NZ` per trial, plus Boolean histories,
-proposals, physical arrays, and container overhead. Post-gate round work remains
+proposals, the `3N`-bit retirement mask, physical arrays, and container
+overhead. Post-gate round work remains
 `Theta(rNZ)` with a larger constant from the persistent and fresh routing
 sweeps.
 
 The driver implements only two blocks and one gate, so constant overhead under
 repeated CNOTs is not established. There is no threshold scan, visualization,
 asynchronous path, Z sector, gate noise, or general circuit interface.
+
+### 4.5 Moving Y-junction CNOT
+
+#### 4.5.1 State and gate
+
+`2d_windowed_cnot_yjunction.jl` is a standalone synchronous derivative of the
+primitive kernel. It separates two observable physical blocks from decoder
+evidence:
+
+~~~text
+YPhysicalBlock:
+    errors, frame, old_synds, new_synds,
+    noise_rounds, measurement_rounds
+
+DecoderLane:
+    hist, fields, new_fields, proposals
+~~~
+
+Before the CNOT, control and target each own one ordinary `DecoderLane`. At the
+gate, the target physical arrays transform as
+
+~~~text
+errors[target]     xor= errors[control]
+frame[target]      xor= frame[control]
+old_synds[target]  xor= old_synds[control]
+new_synds[target]  xor= new_synds[control]
+~~~
+
+The target lane becomes `pre_target`; a non-aliased snapshot of the control
+history and current field becomes `pre_control`; and a fresh empty
+`post_target` lane is allocated. Scratch fields and proposals start empty. The
+continuous control decoder is unchanged, and the gate creates no noise,
+measurement, correction, or artificial history event.
+
+All target lanes update one shared observable target frame. The copied control
+lane contains no separate physical state or correction chain. Exactly one data
+mask and one measurement mask are sampled per physical block per round through
+the `YJunctionRoundMasks` interface.
+
+#### 4.5.2 Y-graph field and feedback rules
+
+At junction depth `g`, the post lane owns `k <= g`, while both pre-gate lanes
+independently own `k > g`. The junction starts at `g=0` and advances once per
+physical or cleanup round. Invalid lane slices are zero.
+
+Every field sweep is globally Jacobi over this branched topology. The inherited
+`3 x 3` candidate plane and 1-norm distance are unchanged. A post-side cone
+crossing from `g` to `g+1` evaluates both pre lanes and retains their smallest
+positive candidate. A pre-side cone crossing toward `g` evaluates the single
+post lane, so post messages advertise into both branches. The rule applies to
+all six field components. Only the merged distance is stored below the
+junction; zero still means no message.
+
+The two temporal branch costs at the interface are retained from the same
+frozen field state as the merged post message. If a post defect at `k=g`
+selects buffer motion, it crosses to exactly one pre endpoint: the smaller
+positive cost wins, with control first on an equal positive tie. A defect is
+never copied. Post defects below the interface move within the post lane;
+pre-gate defects retain ordinary one-way aging toward larger `k`.
+
+All ordinary and junction proposals are selected from frozen histories and
+committed atomically. The XOR parity of spatial proposals from every target
+lane updates the one target frame. The primitive priorities and spatial-only
+`0.8` stochastic back-wall rule are retained. After feedback, the one observed
+target syndrome change is inserted only into `post_target`.
+
+#### 4.5.3 Collapse, readout, and interface
+
+After each round, all three lanes cycle toward the back wall and `g` advances.
+When `g=Z`, the unresolved pre-gate evidence is destructively collapsed:
+
+~~~text
+post.hist[:,:,Z] xor=
+    pre_control.hist[:,:,Z] xor pre_target.hist[:,:,Z]
+
+post.fields[:,:,Z,spatial,:] =
+    nonzeromin(post, pre_control, pre_target)
+~~~
+
+Post temporal back-wall fields and scratch are cleared. The state replaces the
+transition object with `post_target`, releasing both pre lanes. Subsequent
+target rounds use the ordinary baseline lane update. This is the only
+provenance-destroying merge and is a heuristic for residual clusters that
+survive the complete buffer.
+
+Readout is local:
+
+~~~text
+decoded_control = errors[control] xor frame[control]
+decoded_target  = errors[target]  xor frame[target]
+~~~
+
+Cleanup continues with `p=q=0` until histories are empty and the junction has
+collapsed, subject to the configured cap. Nonempty-history cleanup failures
+and collapse failures are reported separately. The guarded driver accepts
+`MODE=CNOT_Ft` and `MODE=CNOT_DEBUG`, exposes
+`estimate_yjunction_cnot_Ft`, and rejects asynchronous, pretty, or second-gate
+use. The scan scripts export an absolute `OUTPUT_FILE` for every array task;
+the driver creates its parent directory and writes the standard `### data ###`
+and `### params ###` result sections. Fixed-sample runs use `SAMPS` (with
+`CNOT_SAMPS` retained as a legacy fallback); without `OUTPUT_FILE`, a direct
+driver invocation prints the result without creating a file.
+
+#### 4.5.4 Overhead and implemented limits
+
+Before the gate and after collapse, the control and target use two field pairs,
+or `24NZ` machine integers. During the transition, continuous control,
+pre-control, pre-target, and post-target use four pairs, or `48NZ` integers.
+At depth `g`, field work visits `3Z-g` slice-equivalents per spatial site and
+falls back to two ordinary block updates after collapse. The gate costs
+`Theta(NZ)`; collapse touches `Theta(N)` wall entries. The transition lasts
+exactly `Z` post-gate or cleanup rounds.
+
+The driver implements two blocks and one ideal synchronous X-sector gate. It
+has no repeated-gate schedule, asynchronous update, visualization, Z sector,
+gate noise, or matched finite-size scan.
+
 
 
 ## 5. Comparison and Evidence
@@ -815,6 +955,7 @@ the active worker count for threaded scans.
 | Sheet-copy | `S` | Separate hidden target and copied-control decoder sheets | `S M_block + O(S)` | `S U_block` | Full-state lineage recurrence; alternating gates can grow as Fibonacci |
 | Snapshot | 2 physical blocks, up to 4 histories | Separate pre-/post-gate histories; only observable blocks are measured | Up to about `4 M_block` before old-history deletion | Up to `4 U_block`, falling as old histories empty | Repeated driver not implemented; `applies_to` avoids deep-copy routing |
 | Two-pass | 2 physical blocks, 1 control history, 3 target streams, 1 retirement history | Separate causal streams joined by label-aware temporal edges | `104NZ` leading integer words plus Boolean state | `Theta(rNZ)` with persistent and fresh route sweeps | Repeated driver not implemented; fixed one-gate allocation |
+| Y-junction | 2 physical blocks; 1 control lane and transient 3-lane target | Two pre-gate branches meet one unlabeled post-gate field on a full local Y graph | Peak `48NZ` integer words, returning to `24NZ` after `Z` rounds | At most `3U_block`, falling to `2U_block` | Repeated driver not implemented; one-gate branches are released at collapse |
 | Block | 2 | One observable XOR-combined history; target fields rebuilt | `2 M_block + O(A)` metadata | `2 U_block`, independent of `A` | Decoder state fixed; stored metadata can follow the same Fibonacci recurrence |
 
 The central tradeoff is therefore:
@@ -829,6 +970,9 @@ The central tradeoff is therefore:
 - two-pass uses the same two physical channels, retains separate target causal
   streams, and permits only the two target-output CNOT-junction paths; its
   performance and larger constant field cost are not yet characterized;
+- Y-junction uses the same two physical channels, permits full bidirectional
+  message cones across a moving interface, and deliberately loses the oldest
+  branch labels at the back wall; its performance is not yet characterized;
 - block restores one physical/measurement channel per output and fixed decoder
   state, but uses a field reset whose decoding performance is not yet
   established.
@@ -911,15 +1055,31 @@ one channel per hidden sheet.
 #### 5.2.6 Two-pass CNOT
 
 The deterministic suite, bounds-checked suite, zero-noise debug path, and a
-small noisy fixed-sample run pass. A seeded one-round parity check against the
-unchanged primitive memory kernel and a full pre-gate/gate/post-gate/cleanup
-extraction-parity check both match every state array and the next RNG draw. No
-matched finite-size scan or threshold estimate exists. The intended comparison
-is paired trials against primitive
-for measurement-only, storage-only, and `p=q` noise, followed by the matched
+small noisy fixed-sample run pass. Explicit paired mask tapes for
+measurement-only (`p=0`), storage-only (`q=0`), and balanced (`p=q`) noise give
+exact pre-gate parity with the copied primitive kernel and exact physical-error
+and syndrome parity after the gate. Decoder frames may differ after the gate by
+design. No matched finite-size scan or threshold estimate exists. Existing
+saved two-pass scans predate the atomic no-continuation retirement rule and are
+not validation of the current implementation. The remaining comparison is
+paired logical trials against primitive followed by the matched
 `L=5,7,9,13,19` protocol. Improved storage-error attribution without loss of
 the primitive crossing remains a working hypothesis, not an established
 result.
+
+#### 5.2.7 Moving Y-junction CNOT
+
+The focused deterministic and bounds-checked suites pass. Explicit paired
+masks give exact persistent-state parity with the copied primitive kernel
+before the gate and exact physical-error and syndrome-register parity after
+the gate; decoder frames may differ by design. Reversed lane/site iteration
+gives the same globally Jacobi field state and branch costs. The zero-noise
+estimator, small noisy fixed-sample path, and two-thread fixed-sample accounting
+also pass. No matched finite-size scan or threshold estimate exists. The
+primary empirical question is whether retaining two pre-gate fields until the
+moving interface reaches the back wall improves target failures over primitive
+without introducing excess cleanup failures. Sheet-copy remains an
+algorithmic oracle rather than a matched physical model.
 
 ## 6. Validation and Operational Caveats
 
@@ -935,6 +1095,8 @@ MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 CLEANUP_TIME=4 SYNCH=true \
     TRIAL_PARALLEL=false julia --threads=1 2d_windowed_cnot_snapshot.jl
 MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 CLEANUP_TIME=4 SYNCH=true \
     TRIAL_PARALLEL=false julia --threads=1 2d_windowed_cnot_twopass.jl
+MODE=CNOT_DEBUG LVAL=3 LOGZ=false ZVAL=2 TVAL=2 CLEANUP_TIME=4 SYNCH=true \
+    TRIAL_PARALLEL=false julia --threads=1 2d_windowed_cnot_yjunction.jl
 ~~~
 
 The sheet-copy and block commands complete successfully. Sheet-copy debug mode
@@ -950,17 +1112,34 @@ suite also runs a small noisy sample:
 julia --startup-file=no test/snapshot_runtests.jl
 ~~~
 
-Two-pass debug mode checks the ideal error/frame map, non-aliasing of copied
+Two-pass debug mode checks the ideal physical-error map, non-aliasing of copied
 pre-control evidence, and zero-noise cleanup. Its focused suite covers field
 priority, standalone loading without snapshot symbols, stored weights,
 no-candidate aging, second-pass recomputation, globally synchronous junction
-messages, physical cross-gate measurement-event closure, labeled routing,
-junction branch priority, physical-channel ownership, one-edge locality,
-back-wall retirement, and exact threaded fixed-sample accounting:
+messages, forced single data and measurement faults on all observable streams,
+labeled routing, junction branch priority, physical-channel ownership,
+one-edge locality, frozen proposal generation, XOR frame parity, reversed
+stream/site/edge-order equivalence, atomic back-wall retirement and parity collisions,
+paired primitive mask traces in all three noise regimes, and exact threaded
+fixed-sample accounting:
 
 ~~~bash
 julia --startup-file=no test/twopass_runtests.jl
 julia --startup-file=no --check-bounds=yes test/twopass_runtests.jl
+~~~
+
+The Y-junction suite checks persistent pre-gate parity with the primitive
+kernel, paired physical/syndrome parity through the gate, gate algebra and
+non-aliasing, all-component bidirectional field cones, global Jacobi
+propagation, reversed lane/site-order equivalence, zero-aware branch minima,
+single-owned crossings, control-first ties, atomic shared-frame feedback, one
+physical channel per block, back-wall parity/field collapse, lane release,
+post-collapse ordinary updates, metric accounting, and small zero/noisy
+estimators:
+
+~~~bash
+julia --startup-file=no test/yjunction_runtests.jl
+julia --startup-file=no --check-bounds=yes test/yjunction_runtests.jl
 ~~~
 
 Primitive debug mode is intended to check XOR propagation, `nonzeromin`,
@@ -1019,11 +1198,22 @@ models and should not be compared as if both were physical-block counts.
 - Two-pass supports one ideal synchronous X-sector CNOT and two blocks. It has
   no asynchronous, repeated-gate, visualization, or threshold-scan result.
 - Two-pass ordinary bulk ties move immediately by fixed priority; labeled
-  defects enter the primitive retirement history only at the finite back wall.
+  defects enter the primitive retirement history only at the finite back wall
+  and only when no legal same-stream or junction proposal touches them.
+- Two-pass physical masks are sampled before decoder work and applied later at
+  the inherited noise stage. This changes RNG consumption relative to old
+  saved scans while preserving the Bernoulli channel.
 - Two-pass applies `w_p` or `w_q` to inherited integer directional distances;
   this is not exact edge-weighted anisotropic message propagation.
 - Two-pass embeds a synchronous-only copy of the primitive/baseline memory
   kernel. Later kernel fixes must therefore be reviewed explicitly here too.
+- Y-junction supports one ideal synchronous X-sector CNOT and two blocks. It
+  has no asynchronous, repeated-gate, visualization, or threshold-scan result.
+- Y-junction message values may fan out into both pre branches, but defects,
+  physical errors, correction links, and noise masks remain single-owned.
+- Y-junction back-wall XOR-collapse deliberately discards pre-control versus
+  pre-target provenance for residual defects after one buffer depth. Its
+  logical-performance cost is unknown.
 - Block ancestry is dynamically irrelevant but not memory-free. Its byte
   diagnostics exclude ancestry.
 - Block asynchronous dynamics are not the legacy baseline asynchronous
@@ -1035,10 +1225,12 @@ models and should not be compared as if both were physical-block counts.
 - The block prototype requires exactly two physical blocks and aligned
   pre-gate buffer coordinates.
 - Saved sheet-copy scans do not validate the block field-reset policy.
+- Saved two-pass scans from before the atomic retirement change do not validate
+  the current two-pass rule.
 - Result directories with different `T_PRE`, `T_POST`, or cleanup schedules
   are not directly comparable.
 - Some result paths use the Unicode division slash in `T∕2`; quote those
   paths in shell commands.
 - Core decoder code is duplicated. Any behavioral fix must be reviewed
   deliberately across the serial baseline, threaded baseline, primitive,
-  sheet-copy, snapshot, two-pass, and block files.
+  sheet-copy, snapshot, two-pass, Y-junction, and block files.
