@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cnot_yjunction_full_scan
+#SBATCH --job-name=cnot_yjunction_initial_scan
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
 #SBATCH --time=4:00:00
@@ -82,7 +82,7 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     mkdir -p logs
     mkdir -p "${OUTPUT_DIR}"
 
-    echo "Submitting ${TOTAL_TASKS} yjunction CNOT full-scan tasks"
+    echo "Submitting ${TOTAL_TASKS} yjunction CNOT initial-scan tasks"
     echo "mode=${MODE}, repeats=${NREPEATS}, threads/task=${THREADS_PER_TASK}, max concurrent=${MAX_CONCURRENT}"
     echo "L=(${L_LIST[*]}), p=(${P_LIST[*]}), qrat=${QRAT}, r=${RVAL}, synch=${SYNCH}, logZ=${LOGZ}"
     echo "TVAL=${TVAL_DEFAULT}, CLEANUP_TIME=${CLEANUP_TIME_DEFAULT}, ACC_ERRORS=${ACC_ERRORS}, SAMPS=${SAMPS}"
@@ -151,7 +151,7 @@ export SAMPS
 export TVAL="${TVAL_VAL}"
 export CLEANUP_TIME="${CLEANUP_TIME_VAL}"
 export JULIA_NUM_THREADS="${THREADS_PER_TASK}"
-export OUT_ADJ="_cnot_yjunction_full_p${PVAL}_L${LVAL}_rep${REPEAT_INDEX}_T${TVAL_VAL}_Tpre${T_PRE_VAL}_Tpost${T_POST_VAL}${SAMPLE_ADJ}"
+export OUT_ADJ="_cnot_yjunction_initial_p${PVAL}_L${LVAL}_rep${REPEAT_INDEX}_T${TVAL_VAL}_Tpre${T_PRE_VAL}_Tpost${T_POST_VAL}${SAMPLE_ADJ}"
 export OUTPUT_FILE="${TASK_OUTPUT_DIR}/2d_CNOT_yjunction_Ft${OUT_ADJ}.txt"
 
 echo "MODE=${MODE} L=${LVAL} p=${PVAL} repeat=${REPEAT_INDEX}"
