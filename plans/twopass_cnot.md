@@ -49,7 +49,8 @@ Each stream owns an `L x L x Z` Boolean history and independent current/scratch
 message fields. Labels denote observable history segments, not simulator-only
 fault origins. Different streams never annihilate directly. A separate primitive
 history receives labeled defects only when they reach the finite back wall;
-ordinary ties never enter it in the bulk.
+ordinary ties never enter it in the bulk. A frozen `L x L x 3` retirement mask
+records which labeled back-wall defects have no incident legal proposal.
 
 ## 3. Gate rule
 
@@ -72,6 +73,14 @@ not a physical sheet and never receives an independent noise channel.
 
 ## 4. Post-gate target round
 
+At each physical round, `sample_twopass_round_masks` creates exactly one data
+mask and one measurement mask for each observable block before either decoder
+runs. `update_twopass_round!` also accepts an explicit `TwopassRoundMasks` value
+and separate noise/decoder RNGs. If no decoder RNG is supplied, the round
+derives a distinct `Xoshiro` only after the masks have been sampled. The masks
+are applied at the inherited physical noise stage, so decoder back-wall draws
+cannot change this or a later round's physical mask tape.
+
 The target round preserves the inherited ordering:
 
 1. Run `r` synchronous local field sweeps independently in every labeled stream
@@ -86,13 +95,16 @@ The target round preserves the inherited ordering:
    long-range propagation while recomputing before the move. Proposals are
    recorded without mutating histories. Junction branches are selected first;
    a directly selected pre-gate endpoint is skipped as an ordinary source.
-4. Apply all labeled and primitive proposals synchronously. Every source defect
-   proposes at most one adjacent edge. Spatial proposal parity is XORed into
-   the one target frame;
-   temporal proposals change only decoder histories.
-5. XOR every labeled defect still on the back wall into the primitive
-   retirement history, never copying it.
-6. Sample one target data-noise mask and one target measurement-noise mask.
+4. From the same frozen histories, select a back-wall retirement only for a
+   labeled defect that is not incident on any selected same-stream or junction
+   edge. This includes incoming edges, so an occupied endpoint can resolve
+   synchronously and a newly arriving wall defect cannot retire in the same
+   round.
+5. Apply all labeled, junction, primitive, and retirement proposals in one XOR
+   commit. Every source defect proposes at most one adjacent edge. Spatial
+   proposal parity is XORed into the one target frame; temporal, junction, and
+   retirement operations change only decoder histories.
+6. Apply the pre-sampled target data and measurement masks.
 7. Cycle every labeled and primitive history once. Insert the observed target
    syndrome change only into `POST_TARGET`.
 8. Advance the moving CNOT-junction depth, capped at the last bulk slice.
@@ -117,8 +129,9 @@ anisotropic weighting of the inherited field, not a new edge-by-edge weighted
 message kernel.
 
 No candidate means no proposal; the defect ages normally. Equal positive costs
-move immediately according to the fixed priority above. Labeled back-wall
-motion is deterministic. After retirement, the primitive history retains the
+move immediately according to the fixed priority above. Labeled legal
+back-wall motion is deterministic. A labeled wall defect retires only when no
+legal proposal touches it. After retirement, the primitive history retains the
 inherited raw-distance priority and `0.8` stochastic back-wall escape rule.
 
 ### 4.2 Stream-aware spacetime graph
@@ -139,12 +152,22 @@ the next one-edge move.
 
 ### 4.3 Back-wall retirement
 
-After labeled proposals are applied, every labeled defect remaining at `k=Z`
-is removed from its stream and XORed into the primitive retirement history at
-the same coordinate. Valid same-stream or capped-junction matches can therefore
-resolve before retirement. This finite-buffer rule is not a response to a
-directional tie. The primitive history uses the inherited unrestricted decoder
-feedback and receives no direct physical syndrome stream.
+Let `H[i,j,Z,s]` be the frozen labeled back-wall history and let
+`touched[i,j,Z,s]` be the incidence of every selected same-stream or junction
+edge. Retirement is selected exactly when
+
+~~~text
+H[i,j,Z,s] && !touched[i,j,Z,s]
+~~~
+
+The synchronous commit clears that labeled bit and XORs the same coordinate
+into the primitive retirement history. Two labels retiring at one coordinate
+therefore cancel by parity; information is never copied. Valid spatial,
+temporal-arrival, or capped-junction proposals resolve or remain labeled before
+retirement. A newly arriving back-wall defect waits until the next round. This
+finite-buffer rule is not a response to a directional tie. The primitive
+history uses the inherited unrestricted decoder feedback and receives no direct
+physical syndrome stream.
 
 ## 5. Readout and failure criterion
 
@@ -176,19 +199,24 @@ no claim is made about the construction for general circuits.
 `test/twopass_runtests.jl` checks gate algebra and non-aliasing, deterministic
 standalone loading without snapshot symbols, direction priority, stored cleanup
 weights, no-candidate aging, same-stream routing, genuine second-pass
-recomputation, globally synchronous junction messages, real cross-gate
-measurement-defect closure, allowed and forbidden junction paths, branch
-priority, one-edge motion, physical-channel ownership, back-wall retirement,
-threaded fixed-sample accounting, rejection of unsupported modes, and small
-zero/noisy end-to-end runs.
+recomputation, globally synchronous junction messages, forced single data and
+measurement faults on every observable stream, allowed and forbidden junction
+paths, branch priority, one-edge motion, frozen proposal generation, XOR frame
+parity, stream/site/edge order independence, atomic back-wall retirement and collisions,
+physical-channel ownership, threaded fixed-sample accounting, rejection of
+unsupported modes, and small zero/noisy end-to-end runs. The paired regression
+uses one explicit mask tape for the two-pass and copied primitive kernels in the
+measurement-only (`p=0`), storage-only (`q=0`), and balanced (`p=q`) regimes;
+it establishes exact pre-gate and physical-channel parity, not a threshold.
 
-The minimum performance study uses paired noise masks against the primitive
+The remaining performance study uses paired noise masks against the primitive
 decoder for `p=0`, `q=0`, and `p=q`, followed by matched scans at
 `L=5,7,9,13,19`, `T=L`, the same `Z`, `r`, CNOT timing, and cleanup. The working
 hypothesis is primitive-like measurement performance with improved storage-error
 attribution. No threshold or noninferiority claim is established until those
-scans are run. Sheet-copy results remain an algorithmic oracle rather than a
-physical-model benchmark.
+scans are run. Existing scan files predate the atomic retirement rule and do
+not validate this implementation. Sheet-copy results remain an algorithmic
+oracle rather than a physical-model benchmark.
 
 ## 8. Known limitations
 
