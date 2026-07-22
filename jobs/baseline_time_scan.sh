@@ -2,18 +2,18 @@
 #SBATCH --job-name=baseline_time_scan_threaded
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
-#SBATCH --time=18:00:00
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=16G
 #SBATCH --output=logs/baseline_time_scan_threaded_%A_%a.out
 #SBATCH --error=logs/baseline_time_scan_threaded_%A_%a.err
 
 set -euo pipefail
 
 MODE=${1:-Ft}
-MAX_CONCURRENT=${2:-15}
+MAX_CONCURRENT=${2:-30}
 JULIA_SCRIPT=${JULIA_SCRIPT:-2d_windowed_baseline.jl}
 THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-16}}
 SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
