@@ -1,0 +1,26 @@
+### data ###
+trials = [100000]
+failures = [137]
+Ft = [0.99863]
+
+### params ###
+Z = 8
+update_time = 19
+stop_mode = "trials"
+cleanup_time = 38
+update_time_factor = 1.0
+buffer_depth_factor = 1.0
+mode = "Ft"
+cleanup_time_factor = 2.0
+r = 3
+L = 19
+Ls = [19]
+max_trials = 100000
+ps = [0.01]
+julia_threads = 16
+Zs = [8]
+logZ = true
+trial_parallel = true
+synch = true
+p = 0.01
+qrat = 1.0
