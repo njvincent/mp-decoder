@@ -474,7 +474,7 @@ function main()
         value > 0 || error("ACC_ERRORS must be positive in failure-stopping mode")
         value
     else
-        value = parse(Int,get(ENV,"MAX_TRIALS","10000"))
+        value = parse(Int,get(ENV,"MAX_TRIALS","100000"))
         value > 0 || error("MAX_TRIALS must be positive in trial-stopping mode")
         value
     end
