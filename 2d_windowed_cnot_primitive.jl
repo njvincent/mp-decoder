@@ -523,31 +523,31 @@ function split_cnot_timing(T, pre_fraction=0.5, post_fraction=0.5)
     return T_PRE, T_POST, CLEANUP_TIME
 end
 
-function estimate_primitive_cnot_Ft(L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_TIME,acc_err,fixed_samps,trial_parallel,verbose)
+function estimate_primitive_cnot_Ft(
+    L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_TIME,
+    stop_mode,target,trial_parallel,verbose,
+)
     """
     Monte Carlo estimate of a primitive CNOT fixed-time success probability.
 
-    If fixed_samps > 0, run exactly that many samples. Otherwise sample until
-    acc_err failed trials have been accumulated, following the original Ft
-    mode. For p = q = 0, a single fixed sample is used to avoid an infinite
-    accumulate-until-failure loop.
+    In failure-stopping mode, run until target logical failures have been
+    accumulated. In trial-stopping mode, run exactly target trials.
     """
-    use_fixed_samps = fixed_samps > 0
-    if !use_fixed_samps && p == 0 && q == 0
-        use_fixed_samps = true
-        fixed_samps = 1
-    end
-    if use_fixed_samps && fixed_samps < 1
-        error("fixed_samps must be positive when fixed-sample CNOT sampling is requested.")
-    elseif !use_fixed_samps && acc_err < 1
-        error("ACC_ERRORS must be positive when CNOT_Ft is accumulating failures.")
-    end
+    stop_mode in ("failures", "trials") ||
+        error("stop_mode must be either failures or trials")
+    target > 0 || error("stopping target must be positive")
+    stop_mode == "failures" && p == 0 && q == 0 &&
+        error("failure-stopping mode cannot terminate at zero noise; use trials")
 
-    work_units = use_fixed_samps ? fixed_samps : acc_err
-    worker_count = trial_parallel ? min(nthreads(),max(work_units,1)) : 1
+    worker_count = trial_parallel ? min(nthreads(), target) : 1
+    worker_targets = [
+        target ÷ worker_count + (worker <= target % worker_count ? 1 : 0)
+        for worker in 1:worker_count
+    ]
+    verbose && println("worker targets = $worker_targets")
     worker_results = Vector{Tuple{Int,Int,Int,Int,Int,Int}}(undef, worker_count)
 
-    function run_cnot_trials(local_samps,target_errors)
+    function run_cnot_trials(worker_target)
         local_hist_c = falses(L,L,Z); local_hist_correction_c = falses(L,L,Z,3)
         local_state_c = falses(L,L,2); local_state_correction_c = falses(L,L,2)
         local_fields_c = zeros(Int,L,L,Z,3,2); local_new_fields_c = zeros(Int,L,L,Z,3,2)
@@ -568,7 +568,8 @@ function estimate_primitive_cnot_Ft(L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_
         local_both_logical_failures = 0
         local_cleanup_failures = 0
 
-        while (use_fixed_samps ? (local_trials < local_samps) : (local_failures < target_errors))
+        while stop_mode == "failures" ?
+            local_failures < worker_target : local_trials < worker_target
             if verbose && local_trials % 10000 == 0
                 println("thread $(threadid()) CNOT trial: ", local_trials)
             end
@@ -635,8 +636,11 @@ function estimate_primitive_cnot_Ft(L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_
             local_cleanup_failures += cleanup_failure ? 1 : 0
             local_trials += 1
 
-            if verbose && !use_fixed_samps && logical_failure
-                println("thread $(threadid()) CNOT progress: $(local_failures / target_errors)")
+            if verbose && logical_failure
+                progress = stop_mode == "failures" ?
+                    local_failures / worker_target :
+                    local_trials / worker_target
+                println("thread $(threadid()) CNOT progress: $progress")
             end
         end
 
@@ -651,14 +655,9 @@ function estimate_primitive_cnot_Ft(L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_
     end
 
     @threads for worker in 1:worker_count
-        if use_fixed_samps
-            local_samps = fixed_samps ÷ worker_count + (worker <= fixed_samps % worker_count ? 1 : 0)
-            worker_results[worker] = run_cnot_trials(local_samps,0)
-        else
-            target_errors = acc_err ÷ worker_count + (worker <= acc_err % worker_count ? 1 : 0)
-            worker_results[worker] = run_cnot_trials(0,target_errors)
-        end
+        worker_results[worker] = run_cnot_trials(worker_targets[worker])
     end
+    verbose && println("worker results = $worker_results")
 
     logical_failures = sum(result[1] for result in worker_results)
     trials = sum(result[2] for result in worker_results)
@@ -671,6 +670,7 @@ function estimate_primitive_cnot_Ft(L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_
     return Dict{String, Any}(
         "CNOT_Ft" => 1 - fail_rate,
         "CNOT_fail_rate" => fail_rate,
+        "failures" => logical_failures,
         "trials" => trials,
         "logical_failures" => logical_failures,
         "control_logical_failures" => control_logical_failures,
@@ -768,11 +768,27 @@ function main()
     cnot_style == "primitive" ||
         error("only CNOT_STYLE=primitive is implemented in this driver")
 
-    acc_errors = parse(Int, get(ENV, "ACC_ERRORS", "1000"))
-    fixed_samps = parse(Int, get(ENV, "SAMPS", "0"))
-    fixed_samps >= 0 || error("SAMPS must be nonnegative")
-    if fixed_samps == 0
-        acc_errors > 0 || error("ACC_ERRORS must be positive when SAMPS=0")
+    legacy_samps = parse(Int, get(ENV, "SAMPS", "0"))
+    legacy_samps >= 0 || error("SAMPS must be nonnegative")
+    default_stop_mode = legacy_samps > 0 ? "trials" : "failures"
+    stop_mode = lowercase(strip(get(ENV, "STOP_MODE", default_stop_mode)))
+    stop_mode in ("failures", "trials") ||
+        error("STOP_MODE must be either failures or trials")
+    legacy_samps > 0 && stop_mode != "trials" &&
+        error("SAMPS>0 is a legacy alias for STOP_MODE=trials")
+
+    target = if stop_mode == "failures"
+        value = parse(Int, get(ENV, "ACC_ERRORS", "1000"))
+        value > 0 || error("ACC_ERRORS must be positive in failure-stopping mode")
+        value
+    else
+        default_trials = legacy_samps > 0 ? string(legacy_samps) : "100000"
+        value = parse(Int, get(ENV, "MAX_TRIALS", default_trials))
+        value > 0 || error("MAX_TRIALS must be positive in trial-stopping mode")
+        legacy_samps > 0 && haskey(ENV, "MAX_TRIALS") &&
+            value != legacy_samps &&
+            error("SAMPS and MAX_TRIALS must agree when both are set")
+        value
     end
 
     repeat_adj = haskey(ENV, "REPEAT_INDEX") ?
@@ -808,10 +824,14 @@ function main()
         "timing_source" => timing_source,
         "CLEANUP_TIME" => cleanup_time,
         "CNOT_STYLE" => cnot_style,
-        "samps" => [fixed_samps > 0 ? fixed_samps : 1],
-        "accu_errors" => acc_errors,
-        "accu_errors_vec" => [acc_errors],
+        "stop_mode" => stop_mode,
     )
+    if stop_mode == "failures"
+        params["acc_errors"] = target
+    else
+        params["max_trials"] = target
+    end
+    legacy_samps > 0 && (params["legacy_samps"] = legacy_samps)
 
     println("details of simulation:")
     println("mode = CNOT_Ft")
@@ -827,14 +847,7 @@ function main()
         "$(post_fraction_spec)T after",
     )
     println("T_PRE = $T_PRE, T_POST = $T_POST, CLEANUP_TIME = $cleanup_time")
-    if fixed_samps > 0
-        println("fixed CNOT samples = $fixed_samps")
-    else
-        println("CNOT failures to accumulate = $acc_errors")
-    end
-    if haskey(ENV, "REPEAT_INDEX")
-        println("repeat index = $(ENV["REPEAT_INDEX"])")
-    end
+    println("stopping mode = $stop_mode, target = $target")
     println(
         "trial parallelism = $(trial_parallel && nthreads() > 1) " *
         "($(nthreads()) Julia threads)",
@@ -851,8 +864,8 @@ function main()
         T_PRE,
         T_POST,
         cleanup_time,
-        acc_errors,
-        fixed_samps,
+        stop_mode,
+        target,
         trial_parallel,
         verbose,
     )
@@ -861,8 +874,9 @@ function main()
     qadj = qrat == 0 ? "" : "_qrat$qrat"
     padj = "_p$(round(p, sigdigits=3))to$(round(p, sigdigits=3))"
     logzadj = logZ ? "_logZ" : ""
+    stop_adj = stop_mode == "failures" ? "_fail$(target)" : "_trials$(target)"
     fout = "2d_CNOT_$(cnot_style)_Ft$(qadj)$(padj)_L$(L)_Z$(Z)" *
-        "$(sadj)$(logzadj)$(out_adj).txt"
+        "$(sadj)$(logzadj)$(stop_adj)$(out_adj).txt"
 
     println("writing to file: $fout")
     open(fout, "w") do io
