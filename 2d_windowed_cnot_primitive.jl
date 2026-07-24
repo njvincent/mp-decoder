@@ -487,19 +487,40 @@ function update_two_blocks!(
     return nothing
 end
 
-function split_cnot_timing(T)
-    """
-    Split the primitive CNOT protocol's total noisy time T into
-    T/2 rounds before the CNOT, T/2 rounds after the CNOT, and 2T cleanup
-    rounds. For odd T, the extra noisy round is placed after the CNOT.
-    """
-    if T < 1
-        error("CNOT total time T must be positive.")
+function parse_cnot_fraction(spec, name)
+    text = strip(spec)
+    if occursin("/", text)
+        parts = split(text, "/")
+        length(parts) == 2 ||
+            error("$name must be a number or a fraction such as 1/4")
+        numerator = parse(Int, parts[1])
+        denominator = parse(Int, parts[2])
+        denominator > 0 || error("$name must have a positive denominator")
+        fraction = numerator // denominator
+    else
+        fraction = parse(Float64, text)
     end
-    T_PRE = fld(T,2)
+    0 <= fraction <= 1 || error("$name must be between 0 and 1")
+    return fraction
+end
+
+function split_cnot_timing(T, pre_fraction=0.5, post_fraction=0.5)
+    """
+    Split the primitive CNOT protocol's total noisy time T according to
+    pre_fraction and post_fraction, followed by 2T cleanup rounds.
+
+    The requested fractions must sum to one. The pre-CNOT duration is rounded
+    down and the remaining noisy rounds are placed after the CNOT. Thus the
+    default half split retains the original odd-T behavior.
+    """
+    T > 0 || error("CNOT total time T must be positive")
+    isapprox(pre_fraction + post_fraction, 1; atol=1e-12, rtol=0) ||
+        error("CNOT pre/post fractions must sum to 1")
+
+    T_PRE = floor(Int, T * pre_fraction)
     T_POST = T - T_PRE
     CLEANUP_TIME = 2T
-    return T_PRE,T_POST,CLEANUP_TIME
+    return T_PRE, T_POST, CLEANUP_TIME
 end
 
 function estimate_primitive_cnot_Ft(L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_TIME,acc_err,fixed_samps,trial_parallel,verbose)
@@ -684,8 +705,45 @@ function main()
     verbose = parse(Bool, get(ENV, "VERBOSE", "true"))
 
     T = parse(Int, get(ENV, "TVAL", string(L)))
-    T_PRE, T_POST, default_cleanup_time = split_cnot_timing(T)
-    if haskey(ENV, "CNOT_T_PRE") || haskey(ENV, "CNOT_T_POST")
+    has_round_override = haskey(ENV, "CNOT_T_PRE") ||
+        haskey(ENV, "CNOT_T_POST")
+    has_fraction_override = haskey(ENV, "CNOT_T_PRE_FRACTION") ||
+        haskey(ENV, "CNOT_T_POST_FRACTION")
+    !(has_round_override && has_fraction_override) ||
+        error("use either CNOT_T_PRE/CNOT_T_POST or fraction overrides, not both")
+
+    pre_fraction_spec = "1/2"
+    post_fraction_spec = "1/2"
+    requested_pre_fraction = 0.5
+    requested_post_fraction = 0.5
+    timing_source = "default"
+
+    if has_fraction_override
+        haskey(ENV, "CNOT_T_PRE_FRACTION") &&
+            haskey(ENV, "CNOT_T_POST_FRACTION") ||
+            error(
+                "CNOT_T_PRE_FRACTION and CNOT_T_POST_FRACTION " *
+                "must be set together",
+            )
+        pre_fraction_spec = ENV["CNOT_T_PRE_FRACTION"]
+        post_fraction_spec = ENV["CNOT_T_POST_FRACTION"]
+        requested_pre_fraction = parse_cnot_fraction(
+            pre_fraction_spec,
+            "CNOT_T_PRE_FRACTION",
+        )
+        requested_post_fraction = parse_cnot_fraction(
+            post_fraction_spec,
+            "CNOT_T_POST_FRACTION",
+        )
+        timing_source = "fractions"
+    end
+
+    T_PRE, T_POST, default_cleanup_time = split_cnot_timing(
+        T,
+        requested_pre_fraction,
+        requested_post_fraction,
+    )
+    if has_round_override
         haskey(ENV, "CNOT_T_PRE") && haskey(ENV, "CNOT_T_POST") ||
             error("CNOT_T_PRE and CNOT_T_POST must be set together")
         T_PRE = parse(Int, ENV["CNOT_T_PRE"])
@@ -694,6 +752,11 @@ function main()
             error("CNOT_T_PRE and CNOT_T_POST must be nonnegative")
         T_PRE + T_POST == T ||
             error("CNOT_T_PRE + CNOT_T_POST must equal TVAL")
+        requested_pre_fraction = T_PRE / T
+        requested_post_fraction = T_POST / T
+        pre_fraction_spec = string(requested_pre_fraction)
+        post_fraction_spec = string(requested_post_fraction)
+        timing_source = "rounds"
     end
 
     cleanup_time_env = lowercase(strip(get(ENV, "CLEANUP_TIME", "auto")))
@@ -714,7 +777,9 @@ function main()
 
     repeat_adj = haskey(ENV, "REPEAT_INDEX") ?
         "_rep$(ENV["REPEAT_INDEX"])" : ""
-    out_adj = get(ENV, "OUT_ADJ", repeat_adj)
+    timing_adj = has_round_override || has_fraction_override ?
+        "_Tpre$(T_PRE)_Tpost$(T_POST)" : ""
+    out_adj = get(ENV, "OUT_ADJ", repeat_adj * timing_adj)
 
     params = Dict{String, Any}(
         "mode" => "CNOT_Ft",
@@ -734,6 +799,13 @@ function main()
         "Ts" => [T],
         "T_PRE" => T_PRE,
         "T_POST" => T_POST,
+        "T_PRE_FRACTION_SPEC" => pre_fraction_spec,
+        "T_POST_FRACTION_SPEC" => post_fraction_spec,
+        "T_PRE_FRACTION" => requested_pre_fraction,
+        "T_POST_FRACTION" => requested_post_fraction,
+        "T_PRE_RESOLVED_FRACTION" => T_PRE / T,
+        "T_POST_RESOLVED_FRACTION" => T_POST / T,
+        "timing_source" => timing_source,
         "CLEANUP_TIME" => cleanup_time,
         "CNOT_STYLE" => cnot_style,
         "samps" => [fixed_samps > 0 ? fixed_samps : 1],
@@ -750,6 +822,10 @@ function main()
     println("synch = $synch")
     println("field update speed = $r")
     println("T = $T")
+    println(
+        "requested split = $(pre_fraction_spec)T before / " *
+        "$(post_fraction_spec)T after",
+    )
     println("T_PRE = $T_PRE, T_POST = $T_POST, CLEANUP_TIME = $cleanup_time")
     if fixed_samps > 0
         println("fixed CNOT samples = $fixed_samps")
