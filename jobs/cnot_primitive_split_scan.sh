@@ -13,7 +13,7 @@
 set -euo pipefail
 
 MODE=${1:-CNOT_Ft}
-NREPEATS=${2:-5}
+NREPEATS=${2:-1}
 MAX_CONCURRENT=${3:-20}
 JULIA_SCRIPT=${JULIA_SCRIPT:-2d_windowed_cnot_primitive.jl}
 THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-16}}
