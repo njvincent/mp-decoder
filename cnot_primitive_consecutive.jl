@@ -7,24 +7,27 @@ using Alert
 using Dates
 using Base.Threads
 
-# Primitive first-version CNOT driver.
+# Consecutive primitive CNOT driver.
 #
 # This file intentionally reuses the one-sector memory decoder below and adds
-# a minimal two-block control/target experiment. It is not a physically
+# a minimal many-control/one-target experiment. It is not a physically
 # complete labeled-defect CNOT decoder; it only applies the X-sector rule
 # c_out = c, t_out = c xor t to the tracked decoder arrays.
 # 
 # Modifications:
-# 1. Both the control and the target first update T/2 rounds before the CNOT 
-#    gate, and they update another T/2 rounds before 2T rounds of cleanup.
-# 2. The update rule for CNOT is that 
+# 1. Each control and the one persistent target own independent DecoderBlock
+#    storage. Every live block receives one independent noise/decoder update
+#    per noisy round.
+# 2. CNOT_INTERVALS specifies the independently configurable noisy intervals:
+#    interval 1, C1 -> T, interval 2, C2 -> T, ..., final interval, cleanup.
+# 3. The update rule for CNOT is that
 #    a. state, state_correction, old_synds, new_synds, and hist of the control 
 #       are unchanged, but the target are XORed with the control.
 #    b. fields of the control is unchanged. fields of the target takes the 
 #       non-zero-min of control and target.
 #    c. new_fields for both the control and the target are set to zero.
-# 3. A trial is counted as failure if either the control or the target has a 
-#    logical failure after the cleanup.
+# 4. A trial is counted as failure if any control or the target has a logical
+#    failure after the cleanup.
 
 
 function nonzeromin(a, b)
@@ -451,6 +454,63 @@ function update!(state,state_correction, old_synds,new_synds, hist,hist_correcti
     end 
 end 
 
+mutable struct DecoderBlock
+    state::BitArray{3}
+    state_correction::BitArray{3}
+    old_synds::BitMatrix
+    new_synds::BitMatrix
+    hist::BitArray{3}
+    hist_correction::BitArray{4}
+    fields::Array{Int,5}
+    new_fields::Array{Int,5}
+end
+
+function make_decoder_block(L,Z)
+    L > 1 || error("decoder block size L must be greater than 1")
+    Z > 1 || error("decoder block depth Z must be at least 2")
+    return DecoderBlock(
+        falses(L,L,2),
+        falses(L,L,2),
+        falses(L,L),
+        falses(L,L),
+        falses(L,L,Z),
+        falses(L,L,Z,3),
+        zeros(Int,L,L,Z,3,2),
+        zeros(Int,L,L,Z,3,2),
+    )
+end
+
+function reset_decoder_block!(block::DecoderBlock)
+    block.state .= false
+    block.state_correction .= false
+    block.old_synds .= false
+    block.new_synds .= false
+    block.hist .= false
+    block.hist_correction .= false
+    block.fields .= 0
+    block.new_fields .= 0
+    return nothing
+end
+
+function update_block!(block::DecoderBlock,r,p,q,synch,pretty)
+    update!(
+        block.state,
+        block.state_correction,
+        block.old_synds,
+        block.new_synds,
+        block.hist,
+        block.hist_correction,
+        block.fields,
+        block.new_fields,
+        r,
+        p,
+        q,
+        synch,
+        pretty,
+    )
+    return nothing
+end
+
 function primitive_cnot_x_sector!(
     state_c,state_correction_c,old_synds_c,new_synds_c,hist_c,fields_c,new_fields_c,
     state_t,state_correction_t,old_synds_t,new_synds_t,hist_t,fields_t,new_fields_t)
@@ -474,61 +534,98 @@ function primitive_cnot_x_sector!(
     return nothing
 end
 
-function update_two_blocks!(
-    state_c,state_correction_c,old_synds_c,new_synds_c,hist_c,hist_correction_c,fields_c,new_fields_c,
-    state_t,state_correction_t,old_synds_t,new_synds_t,hist_t,hist_correction_t,fields_t,new_fields_t,
-    r,p,q,synch,pretty)
-    """
-    Apply the ordinary single-block decoder update independently to control and
-    target memory blocks.
-    """
-    update!(state_c,state_correction_c,old_synds_c,new_synds_c,hist_c,hist_correction_c,fields_c,new_fields_c,r,p,q,synch,pretty)
-    update!(state_t,state_correction_t,old_synds_t,new_synds_t,hist_t,hist_correction_t,fields_t,new_fields_t,r,p,q,synch,pretty)
+function primitive_cnot_x_sector!(
+    control::DecoderBlock,
+    target::DecoderBlock,
+)
+    primitive_cnot_x_sector!(
+        control.state,
+        control.state_correction,
+        control.old_synds,
+        control.new_synds,
+        control.hist,
+        control.fields,
+        control.new_fields,
+        target.state,
+        target.state_correction,
+        target.old_synds,
+        target.new_synds,
+        target.hist,
+        target.fields,
+        target.new_fields,
+    )
+    control.hist_correction .= false
+    target.hist_correction .= false
     return nothing
 end
 
-function parse_cnot_fraction(spec, name)
-    text = strip(spec)
-    if occursin("/", text)
-        parts = split(text, "/")
-        length(parts) == 2 ||
-            error("$name must be a number or a fraction such as 1/4")
-        numerator = parse(Int, parts[1])
-        denominator = parse(Int, parts[2])
-        denominator > 0 || error("$name must have a positive denominator")
-        fraction = numerator // denominator
-    else
-        fraction = parse(Float64, text)
+function update_blocks!(
+    controls::Vector{DecoderBlock},
+    target::DecoderBlock,
+    r,p,q,synch,pretty,
+)
+    """
+    Apply one ordinary decoder round to every live block. Each call to
+    update_block! samples fresh noise, while the target is updated exactly once
+    regardless of the number of controls.
+    """
+    for control in controls
+        update_block!(control,r,p,q,synch,pretty)
     end
-    0 <= fraction <= 1 || error("$name must be between 0 and 1")
-    return fraction
+    update_block!(target,r,p,q,synch,pretty)
+    return nothing
 end
 
-function split_cnot_timing(T, pre_fraction=0.5, post_fraction=0.5)
-    """
-    Split the primitive CNOT protocol's total noisy time T according to
-    pre_fraction and post_fraction, followed by 2T cleanup rounds.
+function run_cnot_sequence!(
+    controls::Vector{DecoderBlock},
+    target::DecoderBlock,
+    intervals::Vector{Int},
+    r,p,q,synch,pretty,
+)
+    length(intervals) == length(controls) + 1 ||
+        error("a sequence with N controls requires N + 1 intervals")
+    all(>=(0), intervals) || error("CNOT intervals must be nonnegative")
 
-    The requested fractions must sum to one. The pre-CNOT duration is rounded
-    down and the remaining noisy rounds are placed after the CNOT. Thus the
-    default half split retains the original odd-T behavior.
-    """
-    T > 0 || error("CNOT total time T must be positive")
-    isapprox(pre_fraction + post_fraction, 1; atol=1e-12, rtol=0) ||
-        error("CNOT pre/post fractions must sum to 1")
+    for gate_index in eachindex(controls)
+        for _ in 1:intervals[gate_index]
+            update_blocks!(controls,target,r,p,q,synch,pretty)
+        end
+        primitive_cnot_x_sector!(controls[gate_index],target)
+    end
 
-    T_PRE = floor(Int, T * pre_fraction)
-    T_POST = T - T_PRE
-    CLEANUP_TIME = 2T
-    return T_PRE, T_POST, CLEANUP_TIME
+    for _ in 1:intervals[end]
+        update_blocks!(controls,target,r,p,q,synch,pretty)
+    end
+    return nothing
 end
 
-function estimate_primitive_cnot_Ft(
-    L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_TIME,
+function parse_cnot_intervals(spec)
+    entries = [
+        entry
+        for entry in split(strip(spec),r"[\s,]+")
+        if !isempty(entry)
+    ]
+    length(entries) >= 2 ||
+        error("CNOT_INTERVALS must contain at least two round counts")
+    intervals = parse.(Int,entries)
+    all(>=(0), intervals) ||
+        error("CNOT_INTERVALS entries must be nonnegative")
+    return intervals
+end
+
+function decoder_histories_empty(
+    controls::Vector{DecoderBlock},
+    target::DecoderBlock,
+)
+    return !any(target.hist) && all(control -> !any(control.hist),controls)
+end
+
+function estimate_consecutive_cnot_Ft(
+    L,Z,p,q,r,synch,pretty,intervals,CLEANUP_TIME,
     stop_mode,target,trial_parallel,verbose,
 )
     """
-    Monte Carlo estimate of a primitive CNOT fixed-time success probability.
+    Monte Carlo estimate of a consecutive primitive-CNOT success probability.
 
     In failure-stopping mode, run until target logical failures have been
     accumulated. In trial-stopping mode, run exactly target trials.
@@ -538,6 +635,12 @@ function estimate_primitive_cnot_Ft(
     target > 0 || error("stopping target must be positive")
     stop_mode == "failures" && p == 0 && q == 0 &&
         error("failure-stopping mode cannot terminate at zero noise; use trials")
+    length(intervals) >= 2 ||
+        error("at least one CNOT requires at least two intervals")
+    all(>=(0), intervals) || error("CNOT intervals must be nonnegative")
+    CLEANUP_TIME >= 0 || error("cleanup time must be nonnegative")
+
+    cnot_count = length(intervals) - 1
 
     worker_count = trial_parallel ? min(nthreads(), target) : 1
     worker_targets = [
@@ -545,27 +648,28 @@ function estimate_primitive_cnot_Ft(
         for worker in 1:worker_count
     ]
     verbose && println("worker targets = $worker_targets")
-    worker_results = Vector{Tuple{Int,Int,Int,Int,Int,Int}}(undef, worker_count)
+    worker_results = Vector{
+        Tuple{Int,Int,Vector{Int},Int,Int,Int,Int}
+    }(undef,worker_count)
 
     function run_cnot_trials(worker_target)
-        local_hist_c = falses(L,L,Z); local_hist_correction_c = falses(L,L,Z,3)
-        local_state_c = falses(L,L,2); local_state_correction_c = falses(L,L,2)
-        local_fields_c = zeros(Int,L,L,Z,3,2); local_new_fields_c = zeros(Int,L,L,Z,3,2)
-        local_old_synds_c = falses(L,L); local_new_synds_c = falses(L,L)
-
-        local_hist_t = falses(L,L,Z); local_hist_correction_t = falses(L,L,Z,3)
-        local_state_t = falses(L,L,2); local_state_correction_t = falses(L,L,2)
-        local_fields_t = zeros(Int,L,L,Z,3,2); local_new_fields_t = zeros(Int,L,L,Z,3,2)
-        local_old_synds_t = falses(L,L); local_new_synds_t = falses(L,L)
-
-        decoded_state_c = falses(L,L,2)
+        controls = [
+            make_decoder_block(L,Z)
+            for _ in 1:cnot_count
+        ]
+        target_block = make_decoder_block(L,Z)
+        decoded_states_c = [
+            falses(L,L,2)
+            for _ in 1:cnot_count
+        ]
         decoded_state_t = falses(L,L,2)
 
         local_failures = 0
         local_trials = 0
-        local_control_logical_failures = 0
+        local_control_logical_failures = zeros(Int,cnot_count)
+        local_any_control_logical_failures = 0
         local_target_logical_failures = 0
-        local_both_logical_failures = 0
+        local_control_target_logical_failures = 0
         local_cleanup_failures = 0
 
         while stop_mode == "failures" ?
@@ -574,65 +678,69 @@ function estimate_primitive_cnot_Ft(
                 println("thread $(threadid()) CNOT trial: ", local_trials)
             end
 
-            local_hist_c .= false; local_hist_correction_c .= false
-            local_state_c .= false; local_state_correction_c .= false
-            local_fields_c .= 0; local_new_fields_c .= 0
-            local_old_synds_c .= false; local_new_synds_c .= false
-
-            local_hist_t .= false; local_hist_correction_t .= false
-            local_state_t .= false; local_state_correction_t .= false
-            local_fields_t .= 0; local_new_fields_t .= 0
-            local_old_synds_t .= false; local_new_synds_t .= false
-
-            for _ in 1:T_PRE
-                update_two_blocks!(
-                    local_state_c,local_state_correction_c,local_old_synds_c,local_new_synds_c,local_hist_c,local_hist_correction_c,local_fields_c,local_new_fields_c,
-                    local_state_t,local_state_correction_t,local_old_synds_t,local_new_synds_t,local_hist_t,local_hist_correction_t,local_fields_t,local_new_fields_t,
-                    r,p,q,synch,pretty)
+            for control in controls
+                reset_decoder_block!(control)
             end
+            reset_decoder_block!(target_block)
 
-            primitive_cnot_x_sector!(
-                local_state_c,local_state_correction_c,local_old_synds_c,local_new_synds_c,local_hist_c,local_fields_c,local_new_fields_c,
-                local_state_t,local_state_correction_t,local_old_synds_t,local_new_synds_t,local_hist_t,local_fields_t,local_new_fields_t)
-            local_hist_correction_c .= false
-            local_hist_correction_t .= false
-
-            for _ in 1:T_POST
-                update_two_blocks!(
-                    local_state_c,local_state_correction_c,local_old_synds_c,local_new_synds_c,local_hist_c,local_hist_correction_c,local_fields_c,local_new_fields_c,
-                    local_state_t,local_state_correction_t,local_old_synds_t,local_new_synds_t,local_hist_t,local_hist_correction_t,local_fields_t,local_new_fields_t,
-                    r,p,q,synch,pretty)
-            end
+            run_cnot_sequence!(
+                controls,
+                target_block,
+                intervals,
+                r,
+                p,
+                q,
+                synch,
+                pretty,
+            )
 
             for _ in 1:CLEANUP_TIME
-                update_two_blocks!(
-                    local_state_c,local_state_correction_c,local_old_synds_c,local_new_synds_c,local_hist_c,local_hist_correction_c,local_fields_c,local_new_fields_c,
-                    local_state_t,local_state_correction_t,local_old_synds_t,local_new_synds_t,local_hist_t,local_hist_correction_t,local_fields_t,local_new_fields_t,
-                    r,0,0,true,pretty)
-                if !any(local_hist_c) && !any(local_hist_t)
+                update_blocks!(controls,target_block,r,0,0,true,pretty)
+                if decoder_histories_empty(controls,target_block)
                     break
                 end
             end
 
-            decoded_state_c .= local_state_c .⊻ local_state_correction_c
-            decoded_state_t .= local_state_t .⊻ local_state_correction_t
-            cleanup_success = !any(local_hist_c) && !any(local_hist_t)
+            for control_index in eachindex(controls)
+                decoded_states_c[control_index] .=
+                    controls[control_index].state .⊻
+                    controls[control_index].state_correction
+            end
+            decoded_state_t .=
+                target_block.state .⊻ target_block.state_correction
+            cleanup_success = decoder_histories_empty(controls,target_block)
             if cleanup_success
-                @assert !any(get_synds(decoded_state_c)) "control decoded state is not syndrome-free!"
+                for control_index in eachindex(controls)
+                    @assert(
+                        !any(get_synds(decoded_states_c[control_index])),
+                        "control $control_index decoded state is not syndrome-free!",
+                    )
+                end
                 @assert !any(get_synds(decoded_state_t)) "target decoded state is not syndrome-free!"
             elseif verbose
                 println("thread $(threadid()) CNOT cleanup did not remove all defects")
             end
 
-            control_logical_failure = !detect_logical_error(decoded_state_c)
+            control_logical_failures = [
+                !detect_logical_error(decoded_state)
+                for decoded_state in decoded_states_c
+            ]
+            any_control_logical_failure = any(control_logical_failures)
             target_logical_failure = !detect_logical_error(decoded_state_t)
             cleanup_failure = !cleanup_success
-            logical_failure = control_logical_failure || target_logical_failure
+            logical_failure =
+                any_control_logical_failure || target_logical_failure
 
             local_failures += logical_failure ? 1 : 0
-            local_control_logical_failures += control_logical_failure ? 1 : 0
+            for control_index in eachindex(controls)
+                local_control_logical_failures[control_index] +=
+                    control_logical_failures[control_index] ? 1 : 0
+            end
+            local_any_control_logical_failures +=
+                any_control_logical_failure ? 1 : 0
             local_target_logical_failures += target_logical_failure ? 1 : 0
-            local_both_logical_failures += (control_logical_failure && target_logical_failure) ? 1 : 0
+            local_control_target_logical_failures +=
+                (any_control_logical_failure && target_logical_failure) ? 1 : 0
             local_cleanup_failures += cleanup_failure ? 1 : 0
             local_trials += 1
 
@@ -648,8 +756,9 @@ function estimate_primitive_cnot_Ft(
             local_failures,
             local_trials,
             local_control_logical_failures,
+            local_any_control_logical_failures,
             local_target_logical_failures,
-            local_both_logical_failures,
+            local_control_target_logical_failures,
             local_cleanup_failures,
         )
     end
@@ -661,29 +770,42 @@ function estimate_primitive_cnot_Ft(
 
     logical_failures = sum(result[1] for result in worker_results)
     trials = sum(result[2] for result in worker_results)
-    control_logical_failures = sum(result[3] for result in worker_results)
-    target_logical_failures = sum(result[4] for result in worker_results)
-    both_logical_failures = sum(result[5] for result in worker_results)
-    cleanup_failures = sum(result[6] for result in worker_results)
+    control_logical_failures = zeros(Int,cnot_count)
+    for result in worker_results
+        control_logical_failures .+= result[3]
+    end
+    any_control_logical_failures =
+        sum(result[4] for result in worker_results)
+    target_logical_failures = sum(result[5] for result in worker_results)
+    control_target_logical_failures =
+        sum(result[6] for result in worker_results)
+    cleanup_failures = sum(result[7] for result in worker_results)
     fail_rate = logical_failures / trials
 
-    return Dict{String, Any}(
+    data = Dict{String, Any}(
         "CNOT_Ft" => 1 - fail_rate,
         "CNOT_fail_rate" => fail_rate,
         "failures" => logical_failures,
         "trials" => trials,
         "logical_failures" => logical_failures,
         "control_logical_failures" => control_logical_failures,
+        "any_control_logical_failures" => any_control_logical_failures,
         "target_logical_failures" => target_logical_failures,
-        "both_logical_failures" => both_logical_failures,
+        "control_target_logical_failures" =>
+            control_target_logical_failures,
         "cleanup_failures" => cleanup_failures,
     )
+    for control_index in 1:cnot_count
+        data["control_$(control_index)_logical_failures"] =
+            control_logical_failures[control_index]
+    end
+    return data
 end
 
 function main()
     mode = get(ENV, "MODE", "CNOT_Ft")
     mode == "CNOT_Ft" ||
-        error("2d_windowed_cnot_primitive.jl supports only MODE=CNOT_Ft")
+        error("cnot_primitive_consecutive.jl supports only MODE=CNOT_Ft")
 
     L = parse(Int, get(ENV, "LVAL", "13"))
     L > 1 || error("LVAL must be greater than 1")
@@ -705,59 +827,13 @@ function main()
     verbose = parse(Bool, get(ENV, "VERBOSE", "true"))
 
     T = parse(Int, get(ENV, "TVAL", string(L)))
-    has_round_override = haskey(ENV, "CNOT_T_PRE") ||
-        haskey(ENV, "CNOT_T_POST")
-    has_fraction_override = haskey(ENV, "CNOT_T_PRE_FRACTION") ||
-        haskey(ENV, "CNOT_T_POST_FRACTION")
-    !(has_round_override && has_fraction_override) ||
-        error("use either CNOT_T_PRE/CNOT_T_POST or fraction overrides, not both")
-
-    pre_fraction_spec = "1/2"
-    post_fraction_spec = "1/2"
-    requested_pre_fraction = 0.5
-    requested_post_fraction = 0.5
-    timing_source = "default"
-
-    if has_fraction_override
-        haskey(ENV, "CNOT_T_PRE_FRACTION") &&
-            haskey(ENV, "CNOT_T_POST_FRACTION") ||
-            error(
-                "CNOT_T_PRE_FRACTION and CNOT_T_POST_FRACTION " *
-                "must be set together",
-            )
-        pre_fraction_spec = ENV["CNOT_T_PRE_FRACTION"]
-        post_fraction_spec = ENV["CNOT_T_POST_FRACTION"]
-        requested_pre_fraction = parse_cnot_fraction(
-            pre_fraction_spec,
-            "CNOT_T_PRE_FRACTION",
-        )
-        requested_post_fraction = parse_cnot_fraction(
-            post_fraction_spec,
-            "CNOT_T_POST_FRACTION",
-        )
-        timing_source = "fractions"
-    end
-
-    T_PRE, T_POST, default_cleanup_time = split_cnot_timing(
-        T,
-        requested_pre_fraction,
-        requested_post_fraction,
-    )
-    if has_round_override
-        haskey(ENV, "CNOT_T_PRE") && haskey(ENV, "CNOT_T_POST") ||
-            error("CNOT_T_PRE and CNOT_T_POST must be set together")
-        T_PRE = parse(Int, ENV["CNOT_T_PRE"])
-        T_POST = parse(Int, ENV["CNOT_T_POST"])
-        T_PRE >= 0 && T_POST >= 0 ||
-            error("CNOT_T_PRE and CNOT_T_POST must be nonnegative")
-        T_PRE + T_POST == T ||
-            error("CNOT_T_PRE + CNOT_T_POST must equal TVAL")
-        requested_pre_fraction = T_PRE / T
-        requested_post_fraction = T_POST / T
-        pre_fraction_spec = string(requested_pre_fraction)
-        post_fraction_spec = string(requested_post_fraction)
-        timing_source = "rounds"
-    end
+    T > 0 || error("TVAL must be positive")
+    default_interval_spec = join(fill(string(T),3),",")
+    interval_spec = get(ENV,"CNOT_INTERVALS",default_interval_spec)
+    intervals = parse_cnot_intervals(interval_spec)
+    cnot_count = length(intervals) - 1
+    noisy_rounds = sum(intervals)
+    default_cleanup_time = 2T
 
     cleanup_time_env = lowercase(strip(get(ENV, "CLEANUP_TIME", "auto")))
     cleanup_time = cleanup_time_env == "auto" ?
@@ -793,9 +869,7 @@ function main()
 
     repeat_adj = haskey(ENV, "REPEAT_INDEX") ?
         "_rep$(ENV["REPEAT_INDEX"])" : ""
-    timing_adj = has_round_override || has_fraction_override ?
-        "_Tpre$(T_PRE)_Tpost$(T_POST)" : ""
-    out_adj = get(ENV, "OUT_ADJ", repeat_adj * timing_adj)
+    out_adj = get(ENV, "OUT_ADJ", repeat_adj)
 
     params = Dict{String, Any}(
         "mode" => "CNOT_Ft",
@@ -813,15 +887,10 @@ function main()
         "julia_threads" => nthreads(),
         "T" => T,
         "Ts" => [T],
-        "T_PRE" => T_PRE,
-        "T_POST" => T_POST,
-        "T_PRE_FRACTION_SPEC" => pre_fraction_spec,
-        "T_POST_FRACTION_SPEC" => post_fraction_spec,
-        "T_PRE_FRACTION" => requested_pre_fraction,
-        "T_POST_FRACTION" => requested_post_fraction,
-        "T_PRE_RESOLVED_FRACTION" => T_PRE / T,
-        "T_POST_RESOLVED_FRACTION" => T_POST / T,
-        "timing_source" => timing_source,
+        "CNOT_COUNT" => cnot_count,
+        "CNOT_INTERVALS_SPEC" => interval_spec,
+        "CNOT_INTERVALS" => intervals,
+        "NOISY_ROUNDS" => noisy_rounds,
         "CLEANUP_TIME" => cleanup_time,
         "CNOT_STYLE" => cnot_style,
         "stop_mode" => stop_mode,
@@ -841,19 +910,17 @@ function main()
     println("p = $p, q = $(p * qrat)")
     println("synch = $synch")
     println("field update speed = $r")
-    println("T = $T")
-    println(
-        "requested split = $(pre_fraction_spec)T before / " *
-        "$(post_fraction_spec)T after",
-    )
-    println("T_PRE = $T_PRE, T_POST = $T_POST, CLEANUP_TIME = $cleanup_time")
+    println("T = $T (default interval and cleanup reference)")
+    println("CNOT count = $cnot_count")
+    println("CNOT intervals = $intervals")
+    println("noisy rounds = $noisy_rounds, CLEANUP_TIME = $cleanup_time")
     println("stopping mode = $stop_mode, target = $target")
     println(
         "trial parallelism = $(trial_parallel && nthreads() > 1) " *
         "($(nthreads()) Julia threads)",
     )
 
-    data = estimate_primitive_cnot_Ft(
+    data = estimate_consecutive_cnot_Ft(
         L,
         Z,
         p,
@@ -861,8 +928,7 @@ function main()
         r,
         synch,
         false,
-        T_PRE,
-        T_POST,
+        intervals,
         cleanup_time,
         stop_mode,
         target,
@@ -875,8 +941,9 @@ function main()
     padj = "_p$(round(p, sigdigits=3))to$(round(p, sigdigits=3))"
     logzadj = logZ ? "_logZ" : ""
     stop_adj = stop_mode == "failures" ? "_fail$(target)" : "_trials$(target)"
+    sequence_adj = "_seq$(cnot_count)_I$(join(intervals,"-"))"
     fout = "2d_CNOT_$(cnot_style)_Ft$(qadj)$(padj)_L$(L)_Z$(Z)" *
-        "$(sadj)$(logzadj)$(stop_adj)$(out_adj).txt"
+        "$(sadj)$(logzadj)$(stop_adj)$(sequence_adj)$(out_adj).txt"
 
     println("writing to file: $fout")
     open(fout, "w") do io
@@ -901,4 +968,6 @@ function main()
     println("finished at time $(Dates.now())")
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end
