@@ -592,6 +592,46 @@ def format_parenthetical_uncertainty(value: float, uncertainty: float) -> str:
     return f"{value:.{decimal_places}f}({uncertainty_digits})"
 
 
+def plot_finite_size_scaling_fit(fit: FiniteSizeScalingFit, ylabel: str) -> None:
+    """Plot the scaling collapse without displaying the detailed fit table."""
+
+    pc, nu, A, *coefficients = fit.parameters
+    included_L = sorted(np.unique(fit.L_fit).astype(int))
+    _, ax = plt.subplots(figsize=(5, 5))
+    for cur_l in included_L:
+        l_mask = fit.L_fit == cur_l
+        x = (fit.p_fit[l_mask] - pc) * cur_l ** (1 / nu)
+        order = np.argsort(x)
+        ax.errorbar(
+            x[order],
+            fit.rate_fit[l_mask][order],
+            yerr=fit.rate_error_fit[l_mask][order],
+            fmt="o",
+            capsize=3,
+            label=f"L = {cur_l}",
+        )
+    x_line = np.linspace(
+        np.min((fit.p_fit - pc) * fit.L_fit ** (1 / nu)),
+        np.max((fit.p_fit - pc) * fit.L_fit ** (1 / nu)),
+        300,
+    )
+    y_line = A + sum(
+        coefficient * x_line**power
+        for power, coefficient in enumerate(coefficients, 1)
+    )
+    ax.plot(
+        x_line,
+        y_line,
+        "k--",
+        label=f"degree-{fit.polynomial_degree} fit",
+    )
+    ax.set_xlabel(r"$(p-p_c)L^{1/\nu}$")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"Scaling collapse: {fit.label}")
+    ax.legend()
+    plt.show()
+
+
 def display_finite_size_scaling_fit(fit: FiniteSizeScalingFit, ylabel: str) -> None:
     """Display a fit table, quality warning, and scaling-collapse plot."""
 
@@ -644,59 +684,50 @@ def display_finite_size_scaling_fit(fit: FiniteSizeScalingFit, ylabel: str) -> N
             )
         )
 
-    _, ax = plt.subplots(figsize=(5, 5))
-    for cur_l in included_L:
-        l_mask = fit.L_fit == cur_l
-        x = (fit.p_fit[l_mask] - pc) * cur_l ** (1 / nu)
-        order = np.argsort(x)
-        ax.errorbar(
-            x[order],
-            fit.rate_fit[l_mask][order],
-            yerr=fit.rate_error_fit[l_mask][order],
-            fmt="o",
-            capsize=3,
-            label=f"L = {cur_l}",
-        )
-    x_line = np.linspace(
-        np.min((fit.p_fit - pc) * fit.L_fit ** (1 / nu)),
-        np.max((fit.p_fit - pc) * fit.L_fit ** (1 / nu)),
-        300,
-    )
-    y_line = A + sum(
-        coefficient * x_line**power
-        for power, coefficient in enumerate(coefficients, 1)
-    )
-    ax.plot(
-        x_line,
-        y_line,
-        "k--",
-        label=f"degree-{fit.polynomial_degree} fit",
-    )
-    ax.set_xlabel(r"$(p-p_c)L^{1/\nu}$")
-    ax.set_ylabel(ylabel)
-    ax.set_title(f"Scaling collapse: {fit.label}")
-    ax.legend()
-    plt.show()
+    plot_finite_size_scaling_fit(fit, ylabel)
 
 
 def display_fit_summary(
-    fits: Sequence[FiniteSizeScalingFit], *, title: str = "Fit summary"
+    fits: Sequence[FiniteSizeScalingFit],
+    *,
+    title: str = "Fit summary",
+    include_degree: bool = True,
+    include_decimal_pc: bool = True,
 ) -> None:
-    """Display threshold and fit-quality results for several fits."""
+    """Display selected threshold and fit-quality results for several fits."""
+
+    headers = ["Timing and block"]
+    alignments = ["---"]
+    if include_degree:
+        headers.append("degree")
+        alignments.append("---:")
+    if include_decimal_pc:
+        headers.append("$p_c$")
+        alignments.append("---:")
+    headers.extend(
+        ["$p_c$ (%)", "$\\nu$", "$\\chi^2 / \\mathrm{dof}$", "fit $p$-value"]
+    )
+    alignments.extend(["---:", "---:", "---:", "---:"])
 
     rows = [
-        "| Timing and block | degree | $p_c$ | $p_c$ (%) | $\\nu$ | "
-        "$\\chi^2 / \\mathrm{dof}$ | fit $p$-value |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join(alignments) + "|",
     ]
     for fit in fits:
-        rows.append(
-            f"| {fit.label} | {fit.polynomial_degree} "
-            f"| {format_parenthetical_uncertainty(fit.pc, fit.pc_error)} "
-            f"| {format_parenthetical_uncertainty(100 * fit.pc, 100 * fit.pc_error)} "
-            f"| {format_parenthetical_uncertainty(fit.nu, fit.nu_error)} "
-            f"| {fit.chi2_per_dof:.2f} | {fit.p_value:.3g} |"
+        values = [fit.label]
+        if include_degree:
+            values.append(str(fit.polynomial_degree))
+        if include_decimal_pc:
+            values.append(format_parenthetical_uncertainty(fit.pc, fit.pc_error))
+        values.extend(
+            [
+                format_parenthetical_uncertainty(100 * fit.pc, 100 * fit.pc_error),
+                format_parenthetical_uncertainty(fit.nu, fit.nu_error),
+                f"{fit.chi2_per_dof:.2f}",
+                f"{fit.p_value:.3g}",
+            ]
         )
+        rows.append("| " + " | ".join(values) + " |")
     display(Markdown(f"## {title}\n\n" + "\n".join(rows)))
 
 
