@@ -22,7 +22,7 @@ MAX_CNOTS=5
 
 MODE=${1:-CNOT_Ft}
 NREPEATS=${2:-1}
-MAX_CONCURRENT=${3:-20}
+MAX_CONCURRENT=${3:-30}
 
 if [[ ! "${MAX_CNOTS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "MAX_CNOTS must be a positive integer." >&2
