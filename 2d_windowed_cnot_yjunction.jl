@@ -2,25 +2,30 @@
 Moving Y-junction CNOT decoder.
 
 This standalone prototype implements one ideal synchronous X-sector CNOT.
-Two labeled pre-gate decoder histories meet one unlabeled post-gate target
-history at a moving junction.  Field messages traverse the Y graph in both
-directions, while every defect remains in exactly one lane.  Once the junction
-reaches the finite back wall, the two pre-gate lanes XOR-collapse into the
-post-gate lane and are released.
+Two labeled pre-CNOT decoder lanes meet one unlabeled post-CNOT target lane at
+a moving junction. Messages traverse the Y graph in both directions, while
+every defect remains in exactly one lane. Once the junction reaches the finite
+back wall, the two pre-CNOT lanes XOR-collapse into the post-CNOT lane and are
+released.
 """
 
 using Random
 using Base.Threads
 
-const Y_CONTROL_BLOCK = 1
-const Y_TARGET_BLOCK = 2
+const CONTROL_BLOCK_ID = 1
+const TARGET_BLOCK_ID = 2
 
-const Y_PRE_CONTROL = UInt8(1)
-const Y_PRE_TARGET = UInt8(2)
-const Y_POST_TARGET = UInt8(3)
-const Y_NO_BRANCH = UInt8(0)
+const PRE_CNOT_CONTROL_LANE_ID = UInt8(1)
+const PRE_CNOT_TARGET_LANE_ID = UInt8(2)
+const POST_CNOT_TARGET_LANE_ID = UInt8(3)
+const NO_LANE_ID = UInt8(0)
 
-function nonzeromin(a,b)
+function nonzero_minimum(a,b)
+    """
+    returns the minimum positive message value, treating zero as "no message"
+    inputs: a,b: integer message values
+    output: the zero-aware minimum of a and b
+    """
     if a == 0
         return b
     elseif b == 0
@@ -29,92 +34,132 @@ function nonzeromin(a,b)
     return min(a,b)
 end
 
-nonzeromin(a,b,c) = nonzeromin(nonzeromin(a,b),c)
+function nonzero_minimum(a,b,c)
+    """
+    three-candidate version of nonzero_minimum
+    inputs: a,b,c: integer message values
+    output: the zero-aware minimum of all three values
+    """
+    return nonzero_minimum(nonzero_minimum(a,b),c)
+end
 
-function get_synds(state)
-    L = size(state,1)
+function compute_syndrome(edge_configuration)
+    """
+    calculates the periodic toric-code plaquette syndrome
+    input: edge_configuration: L x L x 2 BitArray of X errors or decoded edges
+    output: L x L BitArray of plaquette syndromes
+    """
+    L = size(edge_configuration,1)
     ind(i) = mod1(i,L)
     synds = falses(L,L)
     for i in 1:L, j in 1:L
-        synds[i,j] = state[i,j,1] ⊻ state[i,j,2] ⊻
-                      state[ind(i-1),j,1] ⊻ state[i,ind(j-1),2]
+        synds[i,j] = edge_configuration[i,j,1] ⊻ edge_configuration[i,j,2] ⊻
+                      edge_configuration[ind(i-1),j,1] ⊻
+                      edge_configuration[i,ind(j-1),2]
     end
     return synds
 end
 
-function detect_logical_error(state)
-    Lx,Ly,_ = size(state)
+function is_logically_trivial(edge_configuration)
+    """
+    input: anyon-free L x L x 2 edge configuration
+    output: true if both torus winding parities are trivial; false otherwise
+    despite the historical name, true denotes logical success
+    """
+    Lx,Ly,_ = size(edge_configuration)
     xparity = false
     yparity = false
     for i in 1:Lx
-        xparity ⊻= state[i,1,2]
+        xparity ⊻= edge_configuration[i,1,2]
     end
     for j in 1:Ly
-        yparity ⊻= state[1,j,1]
+        yparity ⊻= edge_configuration[1,j,1]
     end
     return !xparity && !yparity
 end
 
-mutable struct YPhysicalBlock
-    block::Int
-    errors::BitArray{3}
-    frame::BitArray{3}
-    old_synds::BitArray{2}
-    new_synds::BitArray{2}
-    noise_rounds::Int
-    measurement_rounds::Int
+# Observable X-sector state for one toric-code block.
+mutable struct PhysicalBlockState
+    block_id::Int                         # observable block identifier
+    errors::BitArray{3}                   # accumulated physical X errors; L x L x 2
+    correction_frame::BitArray{3}         # accumulated recovery; L x L x 2
+    previous_syndrome::BitArray{2}        # preceding measured syndrome; L x L
+    current_syndrome::BitArray{2}         # latest measured syndrome; L x L
+    data_noise_rounds::Int                # applied data-noise channels
+    measurement_noise_rounds::Int         # applied measurement-noise channels
 end
 
+# Decoder evidence and messages for one spacetime lane. A lane owns no physical
+# error state or separate correction frame.
 mutable struct DecoderLane
-    hist::BitArray{3}
-    fields::Array{Int,5}
-    new_fields::Array{Int,5}
-    proposals::BitArray{4}
+    defects::BitArray{3}                  # syndrome-change events; L x L x Z
+    messages::Array{Int,5}                # current messages; L x L x Z x 3 x 2
+    next_messages::Array{Int,5}           # next Jacobi buffer; same shape
+    correction_links::BitArray{4}         # frozen feedback links; L x L x Z x 3
 end
 
-mutable struct TargetYJunction
-    pre_control::DecoderLane
-    pre_target::DecoderLane
-    post_target::DecoderLane
-    junction_depth::Int
-    branch_temporal_costs::Array{Int,3}
-    junction_proposals::Matrix{UInt8}
+# Transient target decoder while the CNOT event crosses the finite window.
+# At depth g, k > g belongs to both pre-CNOT branches and k <= g belongs to
+# post_cnot_target_lane.
+mutable struct TargetJunctionDecoder
+    pre_cnot_control_lane::DecoderLane       # non-aliased control snapshot
+    pre_cnot_target_lane::DecoderLane        # original target lane
+    post_cnot_target_lane::DecoderLane       # unlabeled post-CNOT trunk
+    interface_depth::Int                    # current interface depth g
+    branch_crossing_costs::Array{Int,3}      # frozen costs; L x L x 2
+    branch_choices::Matrix{UInt8}            # winning pre-CNOT lane; L x L
 end
 
-mutable struct YJunctionCNOTState
-    blocks::Vector{YPhysicalBlock}
-    control_history::DecoderLane
-    target_decoder::Union{DecoderLane,TargetYJunction}
-    cnot_applied::Bool
-    rounds::Int
-    cnot_round::Int
-    collapse_round::Int
-    control_branch_crossings::Int
-    target_branch_crossings::Int
-    equal_branch_ties::Int
-    max_target_lane_count::Int
+# Complete two-block physical and decoder state. The target decoder changes
+# from DecoderLane to TargetJunctionDecoder at the gate and returns to DecoderLane
+# after collapse.
+mutable struct YJunctionState
+    physical_blocks::Vector{PhysicalBlockState}            # control and target
+    control_decoder::DecoderLane                           # continuous control decoder
+    target_decoder::Union{DecoderLane,TargetJunctionDecoder} # ordinary or active Y
+    has_applied_cnot::Bool                             # one-gate guard
+    completed_rounds::Int                              # completed rounds
+    cnot_round::Int                                    # gate insertion round
+    collapse_round::Int                                # branch-release round
+    pre_cnot_control_crossings::Int                   # post-to-pre-control moves
+    pre_cnot_target_crossings::Int                    # post-to-pre-target moves
+    equal_branch_cost_ties::Int                       # positive equal-cost ties
+    max_target_lane_count::Int                         # peak target evidence lanes
 end
 
-struct YJunctionRoundMasks
-    data::NTuple{2,BitArray{3}}
-    measurement::NTuple{2,BitArray{2}}
+# One data-error mask and one measurement-error mask per observable block.
+# Tuple index 1 is control and index 2 is target.
+struct RoundNoiseMasks
+    data_errors::NTuple{2,BitArray{3}}         # two L x L x 2 data masks
+    measurement_errors::NTuple{2,BitArray{2}}  # two L x L measurement masks
 end
 
-function YJunctionRoundMasks(
-    control_data::AbstractArray{Bool,3},
-    control_measurement::AbstractArray{Bool,2},
-    target_data::AbstractArray{Bool,3},
-    target_measurement::AbstractArray{Bool,2},
+function RoundNoiseMasks(
+    control_data_errors::AbstractArray{Bool,3},
+    control_measurement_errors::AbstractArray{Bool,2},
+    target_data_errors::AbstractArray{Bool,3},
+    target_measurement_errors::AbstractArray{Bool,2},
 )
-    return YJunctionRoundMasks(
-        (BitArray(control_data),BitArray(target_data)),
-        (BitArray(control_measurement),BitArray(target_measurement)),
+    """
+    copies explicit control/target data and measurement masks into the concrete
+    RoundNoiseMasks representation
+    inputs: four Boolean arrays with data shape L x L x 2 and syndrome shape L x L
+    output: RoundNoiseMasks for one synchronous physical round
+    """
+    return RoundNoiseMasks(
+        (BitArray(control_data_errors),BitArray(target_data_errors)),
+        (BitArray(control_measurement_errors),BitArray(target_measurement_errors)),
     )
 end
 
-function make_yphysical_block(block,L)
-    return YPhysicalBlock(
-        block,
+function initialize_physical_block(block_id,L)
+    """
+    allocates a zeroed observable physical block
+    inputs: block_id: block identifier; L: spatial size
+    output: PhysicalBlockState
+    """
+    return PhysicalBlockState(
+        block_id,
         falses(L,L,2),
         falses(L,L,2),
         falses(L,L),
@@ -124,7 +169,12 @@ function make_yphysical_block(block,L)
     )
 end
 
-function make_decoder_lane(L,Z)
+function initialize_decoder_lane(L,Z)
+    """
+    allocates an empty decoder-evidence lane and scratch buffers
+    inputs: L: spatial size; Z: buffer depth
+    output: DecoderLane
+    """
     return DecoderLane(
         falses(L,L,Z),
         zeros(Int,L,L,Z,3,2),
@@ -133,27 +183,37 @@ function make_decoder_lane(L,Z)
     )
 end
 
-function snapshot_decoder_lane(lane::DecoderLane)
-    L,_,Z = size(lane.hist)
-    copied = make_decoder_lane(L,Z)
-    copied.hist .= lane.hist
-    copied.fields .= lane.fields
+function copy_decoder_lane(lane::DecoderLane)
+    """
+    copies persistent defects and messages without aliasing
+    input: lane: source DecoderLane
+    output: independent DecoderLane with empty next messages and correction links
+    """
+    L,_,Z = size(lane.defects)
+    copied = initialize_decoder_lane(L,Z)
+    copied.defects .= lane.defects
+    copied.messages .= lane.messages
     return copied
 end
 
-function initial_yjunction_state(L,Z)
+function initialize_yjunction_state(L,Z)
+    """
+    creates the zeroed pre-CNOT two-block Y-junction state
+    inputs: L: spatial size, L >= 2; Z: buffer depth, Z >= 2
+    output: YJunctionState with one ordinary decoder lane per block
+    """
     if L < 2
         error("Y-junction CNOT requires L >= 2")
     elseif Z < 2
         error("Y-junction CNOT requires Z >= 2 for a distinct back wall")
     end
-    return YJunctionCNOTState(
-        YPhysicalBlock[
-            make_yphysical_block(Y_CONTROL_BLOCK,L),
-            make_yphysical_block(Y_TARGET_BLOCK,L),
+    return YJunctionState(
+        PhysicalBlockState[
+            initialize_physical_block(CONTROL_BLOCK_ID,L),
+            initialize_physical_block(TARGET_BLOCK_ID,L),
         ],
-        make_decoder_lane(L,Z),
-        make_decoder_lane(L,Z),
+        initialize_decoder_lane(L,Z),
+        initialize_decoder_lane(L,Z),
         false,
         0,
         -1,
@@ -165,7 +225,12 @@ function initial_yjunction_state(L,Z)
     )
 end
 
-function sample_yjunction_channel_mask(rng,dims,probability)
+function sample_noise_mask(rng,dims,probability)
+    """
+    samples a Boolean Bernoulli channel mask
+    inputs: rng; dims: output dimensions; probability in [0,0.5)
+    output: BitArray with independent true entries at the supplied probability
+    """
     if !(0 <= probability < 0.5)
         error("decoder probabilities must satisfy 0 <= probability < 0.5")
     elseif probability == 0
@@ -174,21 +239,31 @@ function sample_yjunction_channel_mask(rng,dims,probability)
     return BitArray(rand(rng,dims...) .< probability)
 end
 
-function sample_yjunction_round_masks(rng,L,p,q)
-    return YJunctionRoundMasks(
-        sample_yjunction_channel_mask(rng,(L,L,2),p),
-        sample_yjunction_channel_mask(rng,(L,L),q),
-        sample_yjunction_channel_mask(rng,(L,L,2),p),
-        sample_yjunction_channel_mask(rng,(L,L),q),
+function sample_round_noise_masks(rng,L,p,q)
+    """
+    samples one complete control/target physical-round mask set
+    inputs: rng; L: spatial size; p: data rate; q: measurement rate
+    output: RoundNoiseMasks
+    """
+    return RoundNoiseMasks(
+        sample_noise_mask(rng,(L,L,2),p),
+        sample_noise_mask(rng,(L,L),q),
+        sample_noise_mask(rng,(L,L,2),p),
+        sample_noise_mask(rng,(L,L),q),
     )
 end
 
-function validate_yjunction_round_masks(masks::YJunctionRoundMasks,L)
-    for block in (Y_CONTROL_BLOCK,Y_TARGET_BLOCK)
-        if size(masks.data[block]) != (L,L,2)
-            error("block $block data mask must have shape ($(L),$(L),2)")
-        elseif size(masks.measurement[block]) != (L,L)
-            error("block $block measurement mask must have shape ($(L),$(L))")
+function validate_round_noise_masks(masks::RoundNoiseMasks,L)
+    """
+    validates explicit data and measurement mask shapes
+    inputs: masks: RoundNoiseMasks; L: spatial size
+    output: the validated masks; throws an error for a shape mismatch
+    """
+    for block_id in (CONTROL_BLOCK_ID,TARGET_BLOCK_ID)
+        if size(masks.data_errors[block_id]) != (L,L,2)
+            error("block $block_id data mask must have shape ($(L),$(L),2)")
+        elseif size(masks.measurement_errors[block_id]) != (L,L)
+            error("block $block_id measurement mask must have shape ($(L),$(L))")
         end
     end
     return masks
@@ -196,9 +271,17 @@ end
 
 # Baseline synchronous decoder kernel.
 
-function lane_site_field_values(i,j,k,fields,hist)
+function compute_decoder_lane_site_messages(i,j,k,messages,defects)
+    """
+    computes all six Lake-style messages at one ordinary-lane site
+    inputs:
+        i,j,k: destination coordinates
+        messages: frozen L x L x Z x 3 x 2 integer message bank
+        defects: frozen L x L x Z defect array
+    output: 3 x 2 matrix of updated messages; does not modify messages or defects
+    """
     values = zeros(Int,3,2)
-    L,_,Z = size(hist)
+    L,_,Z = size(defects)
     ind(index) = mod1(index,L)
     zind(index) = clamp(index,1,Z)
 
@@ -220,10 +303,10 @@ function lane_site_field_values(i,j,k,fields,hist)
                 kp = zind(k-step)
             end
             distance = 1 + abs(delta1) + abs(delta2)
-            if hist[ip,jp,kp]
+            if defects[ip,jp,kp]
                 best = min(best,distance)
             end
-            incoming = fields[ip,jp,kp,axis,sign_index]
+            incoming = messages[ip,jp,kp,axis,sign_index]
             if incoming != 0
                 best = min(best,incoming + distance)
             end
@@ -233,193 +316,272 @@ function lane_site_field_values(i,j,k,fields,hist)
     return values
 end
 
-function update_lane_fields!(lane::DecoderLane)
-    L,_,Z = size(lane.hist)
+function update_decoder_lane_messages!(lane::DecoderLane)
+    """
+    performs one globally synchronous Jacobi message sweep on an ordinary lane
+    input: lane: DecoderLane to update
+    output: nothing; commits lane.next_messages into lane.messages
+    """
+    L,_,Z = size(lane.defects)
     for i in 1:L, j in 1:L, k in 1:Z
-        lane.new_fields[i,j,k,:,:] .= lane_site_field_values(
-            i,j,k,lane.fields,lane.hist,
+        lane.next_messages[i,j,k,:,:] .= compute_decoder_lane_site_messages(
+            i,j,k,lane.messages,lane.defects,
         )
     end
-    lane.fields .= lane.new_fields
+    lane.messages .= lane.next_messages
     return nothing
 end
 
-function perform_correction!(hist,proposals)
-    L,_,Z = size(hist)
+function apply_correction_links!(defects,correction_links)
+    """
+    applies synchronous correction-link endpoints to defects by xor
+    inputs:
+        defects: L x L x Z BitArray of defects
+        correction_links: L x L x Z x 3 BitArray of x, y, and +k links
+    output: nothing; mutates defects
+    correction-link selection must keep temporal links off the back wall
+    """
+    L,_,Z = size(defects)
     ind(index) = mod1(index,L)
     for i in 1:L, j in 1:L, k in 1:Z
-        if proposals[i,j,k,1]
-            hist[i,j,k] ⊻= true
-            hist[ind(i+1),j,k] ⊻= true
+        if correction_links[i,j,k,1]
+            defects[i,j,k] ⊻= true
+            defects[ind(i+1),j,k] ⊻= true
         end
-        if proposals[i,j,k,2]
-            hist[i,j,k] ⊻= true
-            hist[i,ind(j+1),k] ⊻= true
+        if correction_links[i,j,k,2]
+            defects[i,j,k] ⊻= true
+            defects[i,ind(j+1),k] ⊻= true
         end
-        if proposals[i,j,k,3]
-            hist[i,j,k] ⊻= true
-            hist[i,j,k+1] ⊻= true
+        if correction_links[i,j,k,3]
+            defects[i,j,k] ⊻= true
+            defects[i,j,k+1] ⊻= true
         end
     end
     return nothing
 end
 
-function select_lane_proposals!(
+function select_decoder_lane_correction_links!(
     lane::DecoderLane;decoder_rng=Random.default_rng(),
 )
-    L,_,Z = size(lane.hist)
+    """
+    selects primitive-priority feedback moves from frozen ordinary-lane messages
+    inputs: lane: DecoderLane; decoder_rng: RNG for back-wall stochasticity
+    output: nothing; fills lane.correction_links without mutating lane.defects
+    back-wall defects make spatial moves only, with probability 0.8
+    """
+    L,_,Z = size(lane.defects)
     ind(index) = mod1(index,L)
-    lane.proposals .= false
+    lane.correction_links .= false
     for i in 1:L, j in 1:L, k in 1:Z
-        if !lane.hist[i,j,k]
+        if !lane.defects[i,j,k]
             continue
         end
         if k < Z
-            if !any(!iszero,@view lane.fields[i,j,k,:,:])
+            if !any(!iszero,@view lane.messages[i,j,k,:,:])
                 continue
             end
-            mindist = minimum(lane.fields[i,j,k,:,:][lane.fields[i,j,k,:,:] .> 0])
-            if lane.fields[i,j,k,3,2] == mindist
-                lane.proposals[i,j,k,3] = true
-            elseif lane.fields[i,j,k,1,1] == mindist
-                lane.proposals[ind(i-1),j,k,1] = true
-            elseif lane.fields[i,j,k,2,1] == mindist
-                lane.proposals[i,ind(j-1),k,2] = true
-            elseif lane.fields[i,j,k,2,2] == mindist
-                lane.proposals[i,j,k,2] = true
-            elseif lane.fields[i,j,k,1,2] == mindist
-                lane.proposals[i,j,k,1] = true
+            mindist = minimum(lane.messages[i,j,k,:,:][lane.messages[i,j,k,:,:] .> 0])
+            if lane.messages[i,j,k,3,2] == mindist
+                lane.correction_links[i,j,k,3] = true
+            elseif lane.messages[i,j,k,1,1] == mindist
+                lane.correction_links[ind(i-1),j,k,1] = true
+            elseif lane.messages[i,j,k,2,1] == mindist
+                lane.correction_links[i,ind(j-1),k,2] = true
+            elseif lane.messages[i,j,k,2,2] == mindist
+                lane.correction_links[i,j,k,2] = true
+            elseif lane.messages[i,j,k,1,2] == mindist
+                lane.correction_links[i,j,k,1] = true
             end
-        elseif any(!iszero,@view lane.fields[i,j,k,1:2,:]) &&
+        elseif any(!iszero,@view lane.messages[i,j,k,1:2,:]) &&
                rand(decoder_rng) < 0.8
-            mindist = minimum(lane.fields[i,j,k,1:2,:][lane.fields[i,j,k,1:2,:] .> 0])
-            if lane.fields[i,j,k,1,1] == mindist
-                lane.proposals[ind(i-1),j,k,1] = true
-            elseif lane.fields[i,j,k,2,1] == mindist
-                lane.proposals[i,ind(j-1),k,2] = true
-            elseif lane.fields[i,j,k,2,2] == mindist
-                lane.proposals[i,j,k,2] = true
-            elseif lane.fields[i,j,k,1,2] == mindist
-                lane.proposals[i,j,k,1] = true
+            mindist = minimum(lane.messages[i,j,k,1:2,:][lane.messages[i,j,k,1:2,:] .> 0])
+            if lane.messages[i,j,k,1,1] == mindist
+                lane.correction_links[ind(i-1),j,k,1] = true
+            elseif lane.messages[i,j,k,2,1] == mindist
+                lane.correction_links[i,ind(j-1),k,2] = true
+            elseif lane.messages[i,j,k,2,2] == mindist
+                lane.correction_links[i,j,k,2] = true
+            elseif lane.messages[i,j,k,1,2] == mindist
+                lane.correction_links[i,j,k,1] = true
             end
         end
     end
     return nothing
 end
 
-function commit_lane_proposals!(lane::DecoderLane,frame)
-    L,_,_ = size(lane.hist)
+function commit_decoder_lane_correction_links!(lane::DecoderLane,correction_frame)
+    """
+    commits one lane's frozen correction_links
+    inputs: lane: DecoderLane; correction_frame: shared L x L x 2 Pauli frame
+    output: nothing; xors spatial parity into the frame and link endpoints into defects
+    """
+    L,_,_ = size(lane.defects)
     for i in 1:L, j in 1:L, axis in 1:2
-        frame[i,j,axis] ⊻= reduce(⊻,@view lane.proposals[i,j,:,axis])
+        correction_frame[i,j,axis] ⊻=
+            reduce(⊻,@view lane.correction_links[i,j,:,axis])
     end
-    perform_correction!(lane.hist,lane.proposals)
+    apply_correction_links!(lane.defects,lane.correction_links)
     return nothing
 end
 
-function rg_cycle!(lane::DecoderLane)
-    _,_,Z = size(lane.hist)
-    lane.hist[:,:,Z] .= xor.(lane.hist[:,:,Z],lane.hist[:,:,Z-1])
+function age_decoder_lane!(lane::DecoderLane)
+    """
+    ages one decoder lane toward larger buffer depth
+    input: lane: DecoderLane
+    output: nothing; xors defects onto the back wall, zero-aware-merges spatial
+        wall messages, shifts bulk slices, and clears the front and scratch buffers
+    """
+    _,_,Z = size(lane.defects)
+    lane.defects[:,:,Z] .= xor.(lane.defects[:,:,Z],lane.defects[:,:,Z-1])
     if Z > 2
-        copyto!(@view(lane.hist[:,:,2:end-1]),@view(lane.hist[:,:,1:end-2]))
+        copyto!(@view(lane.defects[:,:,2:end-1]),@view(lane.defects[:,:,1:end-2]))
     end
-    lane.hist[:,:,1] .= false
+    lane.defects[:,:,1] .= false
 
-    lane.fields[:,:,Z,1:2,:] .= nonzeromin.(
-        lane.fields[:,:,Z-1,1:2,:],lane.fields[:,:,Z,1:2,:],
+    lane.messages[:,:,Z,1:2,:] .= nonzero_minimum.(
+        lane.messages[:,:,Z-1,1:2,:],lane.messages[:,:,Z,1:2,:],
     )
     if Z > 2
         copyto!(
-            @view(lane.fields[:,:,2:end-1,:,:]),
-            @view(lane.fields[:,:,1:end-2,:,:]),
+            @view(lane.messages[:,:,2:end-1,:,:]),
+            @view(lane.messages[:,:,1:end-2,:,:]),
         )
     end
-    lane.fields[:,:,1,:,:] .= 0
-    lane.new_fields .= 0
-    lane.proposals .= false
+    lane.messages[:,:,1,:,:] .= 0
+    lane.next_messages .= 0
+    lane.correction_links .= false
     return nothing
 end
 
-function apply_block_channel!(
-    block::YPhysicalBlock,data_mask,measurement_mask,
+function apply_noise_to_block!(
+    physical_block::PhysicalBlockState,data_errors,measurement_errors,
 )
-    block.errors .⊻= data_mask
-    block.old_synds .= block.new_synds
-    block.new_synds .= get_synds(block.errors)
-    block.new_synds .⊻= measurement_mask
-    block.noise_rounds += 1
-    block.measurement_rounds += 1
-    return block.old_synds .⊻ block.new_synds
+    """
+    applies one observable physical and measurement channel
+    inputs:
+        physical_block: PhysicalBlockState
+        data_errors: L x L x 2 BitArray
+        measurement_errors: L x L BitArray
+    output: L x L observable syndrome-change event; mutates the block and counters
+    """
+    physical_block.errors .⊻= data_errors
+    physical_block.previous_syndrome .= physical_block.current_syndrome
+    physical_block.current_syndrome .= compute_syndrome(physical_block.errors)
+    physical_block.current_syndrome .⊻= measurement_errors
+    physical_block.data_noise_rounds += 1
+    physical_block.measurement_noise_rounds += 1
+    return physical_block.previous_syndrome .⊻ physical_block.current_syndrome
 end
 
-function update_live_lane!(
-    block::YPhysicalBlock,lane::DecoderLane,r,data_mask,measurement_mask;
+function update_decoder_lane!(
+    physical_block::PhysicalBlockState,lane::DecoderLane,r,
+    data_errors,measurement_errors;
     decoder_rng=Random.default_rng(),
 )
+    """
+    runs one complete ordinary synchronous decoder round
+    inputs: physical block, lane, message-sweep count r, explicit noise masks,
+        and decoder_rng for feedback stochasticity
+    output: nothing; performs messages, feedback, physical channel, aging, and
+        front-slice event insertion in that order
+    """
     if r < 1
         error("Y-junction CNOT requires r >= 1")
     end
     for _ in 1:r
-        update_lane_fields!(lane)
+        update_decoder_lane_messages!(lane)
     end
-    select_lane_proposals!(lane;decoder_rng=decoder_rng)
-    commit_lane_proposals!(lane,block.frame)
-    new_event = apply_block_channel!(block,data_mask,measurement_mask)
-    rg_cycle!(lane)
-    lane.hist[:,:,1] .= new_event
+    select_decoder_lane_correction_links!(lane;decoder_rng=decoder_rng)
+    commit_decoder_lane_correction_links!(lane,physical_block.correction_frame)
+    new_event = apply_noise_to_block!(
+        physical_block,data_errors,measurement_errors,
+    )
+    age_decoder_lane!(lane)
+    lane.defects[:,:,1] .= new_event
     return nothing
 end
 
-# Y-junction field topology.
+# Y-junction message topology.
 
-function y_lane(junction::TargetYJunction,lane_id::UInt8)
-    if lane_id == Y_PRE_CONTROL
-        return junction.pre_control
-    elseif lane_id == Y_PRE_TARGET
-        return junction.pre_target
-    elseif lane_id == Y_POST_TARGET
-        return junction.post_target
+function get_target_junction_lane(junction::TargetJunctionDecoder,lane_id::UInt8)
+    """
+    input: junction and one PRE_CNOT_CONTROL_LANE_ID/PRE_CNOT_TARGET_LANE_ID/POST_CNOT_TARGET_LANE_ID identifier
+    output: the corresponding DecoderLane; errors for an invalid identifier
+    """
+    if lane_id == PRE_CNOT_CONTROL_LANE_ID
+        return junction.pre_cnot_control_lane
+    elseif lane_id == PRE_CNOT_TARGET_LANE_ID
+        return junction.pre_cnot_target_lane
+    elseif lane_id == POST_CNOT_TARGET_LANE_ID
+        return junction.post_cnot_target_lane
     end
     error("invalid Y-junction lane id $lane_id")
 end
 
-function y_candidate_lane_ids(dest_lane::UInt8,dest_k,candidate_k,g)
-    if dest_lane == Y_POST_TARGET
-        if candidate_k <= g
-            return (Y_POST_TARGET,Y_NO_BRANCH)
-        elseif dest_k == g && candidate_k == g + 1
-            return (Y_PRE_CONTROL,Y_PRE_TARGET)
+function get_target_junction_candidate_lane_ids(
+    destination_lane_id::UInt8,destination_depth,candidate_depth,interface_depth,
+)
+    """
+    determines which lane or lanes supply one frozen message candidate
+    inputs: destination lane/depth, candidate depth, and interface depth
+    output: two lane identifiers, using NO_LANE_ID for absent candidates
+    post-CNOT-to-pre-CNOT crossings expose both branches; reverse crossings
+    expose the single post-CNOT lane
+    """
+    if destination_lane_id == POST_CNOT_TARGET_LANE_ID
+        if candidate_depth <= interface_depth
+            return (POST_CNOT_TARGET_LANE_ID,NO_LANE_ID)
+        elseif destination_depth == interface_depth &&
+               candidate_depth == interface_depth + 1
+            return (PRE_CNOT_CONTROL_LANE_ID,PRE_CNOT_TARGET_LANE_ID)
         end
     else
-        if candidate_k > g
-            return (dest_lane,Y_NO_BRANCH)
-        elseif dest_k == g + 1 && candidate_k == g
-            return (Y_POST_TARGET,Y_NO_BRANCH)
+        if candidate_depth > interface_depth
+            return (destination_lane_id,NO_LANE_ID)
+        elseif destination_depth == interface_depth + 1 &&
+               candidate_depth == interface_depth
+            return (POST_CNOT_TARGET_LANE_ID,NO_LANE_ID)
         end
     end
-    return (Y_NO_BRANCH,Y_NO_BRANCH)
+    return (NO_LANE_ID,NO_LANE_ID)
 end
 
-function update_y_candidate!(
-    best,distance,junction::TargetYJunction,lane_id,ip,jp,kp,axis,sign_index,
+function reduce_target_junction_message_candidate(
+    best,distance,junction::TargetJunctionDecoder,lane_id,ip,jp,kp,axis,sign_index,
 )
-    if lane_id == Y_NO_BRANCH
+    """
+    reduces one lane's defect or nonzero message into the current best cost
+    inputs: current best, geometric distance, junction, candidate lane/site,
+        and message component
+    output: updated best cost; NO_LANE_ID is ignored
+    """
+    if lane_id == NO_LANE_ID
         return best
     end
-    lane = y_lane(junction,lane_id)
-    if lane.hist[ip,jp,kp]
+    lane = get_target_junction_lane(junction,lane_id)
+    if lane.defects[ip,jp,kp]
         best = min(best,distance)
     end
-    incoming = lane.fields[ip,jp,kp,axis,sign_index]
+    incoming = lane.messages[ip,jp,kp,axis,sign_index]
     if incoming != 0
         best = min(best,incoming + distance)
     end
     return best
 end
 
-function y_site_field_values(junction::TargetYJunction,dest_lane::UInt8,i,j,k)
+function compute_target_junction_site_messages(
+    junction::TargetJunctionDecoder,destination_lane_id::UInt8,i,j,k,
+)
+    """
+    computes all six messages at one valid Y-graph destination
+    inputs: junction, destination lane identifier, and coordinates i,j,k
+    output: 3 x 2 message matrix; does not mutate the frozen lane banks
+    uses the ordinary 3 x 3 candidate planes and 1-norm distances with moving
+    interface ownership
+    """
     values = zeros(Int,3,2)
-    L,_,Z = size(junction.post_target.hist)
-    g = junction.junction_depth
+    L,_,Z = size(junction.post_cnot_target_lane.defects)
+    g = junction.interface_depth
     ind(index) = mod1(index,L)
     zind(index) = clamp(index,1,Z)
 
@@ -441,11 +603,13 @@ function y_site_field_values(junction::TargetYJunction,dest_lane::UInt8,i,j,k)
                 kp = zind(k-step)
             end
             distance = 1 + abs(delta1) + abs(delta2)
-            lane_a,lane_b = y_candidate_lane_ids(dest_lane,k,kp,g)
-            best = update_y_candidate!(
+            lane_a,lane_b = get_target_junction_candidate_lane_ids(
+                destination_lane_id,k,kp,g,
+            )
+            best = reduce_target_junction_message_candidate(
                 best,distance,junction,lane_a,ip,jp,kp,axis,sign_index,
             )
-            best = update_y_candidate!(
+            best = reduce_target_junction_message_candidate(
                 best,distance,junction,lane_b,ip,jp,kp,axis,sign_index,
             )
         end
@@ -454,71 +618,92 @@ function y_site_field_values(junction::TargetYJunction,dest_lane::UInt8,i,j,k)
     return values
 end
 
-function yjunction_field_sweep!(junction::TargetYJunction)
-    L,_,Z = size(junction.post_target.hist)
-    g = junction.junction_depth
-    for lane in (junction.pre_control,junction.pre_target,junction.post_target)
-        lane.new_fields .= 0
+function update_target_junction_messages!(junction::TargetJunctionDecoder)
+    """
+    performs one globally synchronous Jacobi sweep over the valid Y graph
+    input: junction: TargetJunctionDecoder
+    output: nothing; commits all three message banks together and caches both
+        branch-specific temporal costs from the same frozen state
+    """
+    L,_,Z = size(junction.post_cnot_target_lane.defects)
+    g = junction.interface_depth
+    for lane in (
+        junction.pre_cnot_control_lane,
+        junction.pre_cnot_target_lane,
+        junction.post_cnot_target_lane,
+    )
+        lane.next_messages .= 0
     end
 
     if g > 0
         for i in 1:L, j in 1:L, k in 1:g
-            junction.post_target.new_fields[i,j,k,:,:] .= y_site_field_values(
-                junction,Y_POST_TARGET,i,j,k,
-            )
+            junction.post_cnot_target_lane.next_messages[i,j,k,:,:] .=
+                compute_target_junction_site_messages(
+                    junction,POST_CNOT_TARGET_LANE_ID,i,j,k,
+                )
         end
     end
     if g < Z
-        for lane_id in (Y_PRE_CONTROL,Y_PRE_TARGET)
-            lane = y_lane(junction,lane_id)
+        for lane_id in (PRE_CNOT_CONTROL_LANE_ID,PRE_CNOT_TARGET_LANE_ID)
+            lane = get_target_junction_lane(junction,lane_id)
             for i in 1:L, j in 1:L, k in g+1:Z
-                lane.new_fields[i,j,k,:,:] .= y_site_field_values(
+                lane.next_messages[i,j,k,:,:] .= compute_target_junction_site_messages(
                     junction,lane_id,i,j,k,
                 )
             end
         end
     end
 
-    # Preserve the two branch costs from the same frozen field state that
-    # produced the merged post-side temporal message.  Recomputing these after
-    # committing the Jacobi sweep would use a one-sweep-newer branch field and
+    # Preserve the two branch costs from the same frozen message state that
+    # produced the merged post-CNOT temporal message. Recomputing these after
+    # committing the Jacobi sweep would use a one-sweep-newer branch message and
     # could route a defect through a branch that did not supply its minimum.
-    junction.branch_temporal_costs .= 0
+    junction.branch_crossing_costs .= 0
     if 1 <= g < Z
         for i in 1:L, j in 1:L
-            junction.branch_temporal_costs[i,j,1] =
-                junction_branch_temporal_cost(junction,Y_PRE_CONTROL,i,j)
-            junction.branch_temporal_costs[i,j,2] =
-                junction_branch_temporal_cost(junction,Y_PRE_TARGET,i,j)
+            junction.branch_crossing_costs[i,j,1] =
+                compute_target_junction_branch_crossing_cost(junction,PRE_CNOT_CONTROL_LANE_ID,i,j)
+            junction.branch_crossing_costs[i,j,2] =
+                compute_target_junction_branch_crossing_cost(junction,PRE_CNOT_TARGET_LANE_ID,i,j)
         end
     end
 
     # Commit every lane only after the complete Y graph has been evaluated.
-    for lane in (junction.pre_control,junction.pre_target,junction.post_target)
-        lane.fields .= lane.new_fields
+    for lane in (
+        junction.pre_cnot_control_lane,
+        junction.pre_cnot_target_lane,
+        junction.post_cnot_target_lane,
+    )
+        lane.messages .= lane.next_messages
     end
     return nothing
 end
 
-function junction_branch_temporal_cost(
-    junction::TargetYJunction,branch::UInt8,i,j,
+function compute_target_junction_branch_crossing_cost(
+    junction::TargetJunctionDecoder,lane_id::UInt8,i,j,
 )
-    L,_,Z = size(junction.post_target.hist)
-    g = junction.junction_depth
-    if !(1 <= g < Z) || !(branch in (Y_PRE_CONTROL,Y_PRE_TARGET))
+    """
+    computes a branch-specific +k crossing cost at the moving interface
+    inputs: junction, pre-CNOT lane identifier, and post-CNOT site i,j
+    output: smallest positive cost into branch slice g+1, or zero if absent
+    """
+    L,_,Z = size(junction.post_cnot_target_lane.defects)
+    g = junction.interface_depth
+    if !(1 <= g < Z) ||
+       !(lane_id in (PRE_CNOT_CONTROL_LANE_ID,PRE_CNOT_TARGET_LANE_ID))
         return 0
     end
     ind(index) = mod1(index,L)
-    lane = y_lane(junction,branch)
+    lane = get_target_junction_lane(junction,lane_id)
     best = typemax(Int)
     for delta_i in -1:1, delta_j in -1:1
         ip = ind(i+delta_i)
         jp = ind(j+delta_j)
         distance = 1 + abs(delta_i) + abs(delta_j)
-        if lane.hist[ip,jp,g+1]
+        if lane.defects[ip,jp,g+1]
             best = min(best,distance)
         end
-        incoming = lane.fields[ip,jp,g+1,3,2]
+        incoming = lane.messages[ip,jp,g+1,3,2]
         if incoming != 0
             best = min(best,incoming + distance)
         end
@@ -526,315 +711,432 @@ function junction_branch_temporal_cost(
     return best == typemax(Int) ? 0 : best
 end
 
-function choose_junction_branch!(state::YJunctionCNOTState,junction,i,j)
-    control_cost = junction.branch_temporal_costs[i,j,1]
-    target_cost = junction.branch_temporal_costs[i,j,2]
+function select_target_junction_pre_cnot_lane!(state::YJunctionState,junction,i,j)
+    """
+    chooses the winning pre-CNOT lane for one post-CNOT defect crossing
+    inputs: global state, active junction, and post-CNOT site i,j
+    output: lane identifier or NO_LANE_ID
+    zero means absent; the smaller positive cost wins; an equal positive tie
+    selects pre-control and increments the tie counter
+    """
+    control_cost = junction.branch_crossing_costs[i,j,1]
+    target_cost = junction.branch_crossing_costs[i,j,2]
     if control_cost == 0
-        return target_cost == 0 ? Y_NO_BRANCH : Y_PRE_TARGET
+        return target_cost == 0 ? NO_LANE_ID : PRE_CNOT_TARGET_LANE_ID
     elseif target_cost == 0
-        return Y_PRE_CONTROL
+        return PRE_CNOT_CONTROL_LANE_ID
     elseif control_cost == target_cost
-        state.equal_branch_ties += 1
-        return Y_PRE_CONTROL
+        state.equal_branch_cost_ties += 1
+        return PRE_CNOT_CONTROL_LANE_ID
     elseif control_cost < target_cost
-        return Y_PRE_CONTROL
+        return PRE_CNOT_CONTROL_LANE_ID
     end
-    return Y_PRE_TARGET
+    return PRE_CNOT_TARGET_LANE_ID
 end
 
-function select_yjunction_proposals!(
-    state::YJunctionCNOTState,junction::TargetYJunction;
+function select_target_junction_correction_links!(
+    state::YJunctionState,junction::TargetJunctionDecoder;
     decoder_rng=Random.default_rng(),
 )
-    L,_,Z = size(junction.post_target.hist)
-    g = junction.junction_depth
+    """
+    selects frozen ordinary correction links and junction branch choices
+    inputs: global state, active junction, and decoder_rng
+    output: nothing; fills all lane correction links and junction branch choices
+    post-CNOT defects cross into one pre-CNOT lane; pre-CNOT defects stay owned
+    and move only toward larger k
+    """
+    L,_,Z = size(junction.post_cnot_target_lane.defects)
+    g = junction.interface_depth
     ind(index) = mod1(index,L)
-    junction.junction_proposals .= Y_NO_BRANCH
-    for lane in (junction.pre_control,junction.pre_target,junction.post_target)
-        lane.proposals .= false
+    junction.branch_choices .= NO_LANE_ID
+    for lane in (
+        junction.pre_cnot_control_lane,
+        junction.pre_cnot_target_lane,
+        junction.post_cnot_target_lane,
+    )
+        lane.correction_links .= false
     end
 
-    # Pre-gate lanes retain ordinary one-way defect aging toward larger k.
+    # Pre-CNOT lanes retain ordinary one-way defect aging toward larger k.
     if g < Z
-        for lane_id in (Y_PRE_CONTROL,Y_PRE_TARGET)
-            lane = y_lane(junction,lane_id)
+        for lane_id in (PRE_CNOT_CONTROL_LANE_ID,PRE_CNOT_TARGET_LANE_ID)
+            lane = get_target_junction_lane(junction,lane_id)
             for i in 1:L, j in 1:L, k in g+1:Z
-                if !lane.hist[i,j,k]
+                if !lane.defects[i,j,k]
                     continue
                 end
-                if k < Z && any(!iszero,@view lane.fields[i,j,k,:,:])
-                    mindist = minimum(lane.fields[i,j,k,:,:][lane.fields[i,j,k,:,:] .> 0])
-                    if lane.fields[i,j,k,3,2] == mindist
-                        lane.proposals[i,j,k,3] = true
-                    elseif lane.fields[i,j,k,1,1] == mindist
-                        lane.proposals[ind(i-1),j,k,1] = true
-                    elseif lane.fields[i,j,k,2,1] == mindist
-                        lane.proposals[i,ind(j-1),k,2] = true
-                    elseif lane.fields[i,j,k,2,2] == mindist
-                        lane.proposals[i,j,k,2] = true
-                    elseif lane.fields[i,j,k,1,2] == mindist
-                        lane.proposals[i,j,k,1] = true
+                if k < Z && any(!iszero,@view lane.messages[i,j,k,:,:])
+                    mindist = minimum(lane.messages[i,j,k,:,:][lane.messages[i,j,k,:,:] .> 0])
+                    if lane.messages[i,j,k,3,2] == mindist
+                        lane.correction_links[i,j,k,3] = true
+                    elseif lane.messages[i,j,k,1,1] == mindist
+                        lane.correction_links[ind(i-1),j,k,1] = true
+                    elseif lane.messages[i,j,k,2,1] == mindist
+                        lane.correction_links[i,ind(j-1),k,2] = true
+                    elseif lane.messages[i,j,k,2,2] == mindist
+                        lane.correction_links[i,j,k,2] = true
+                    elseif lane.messages[i,j,k,1,2] == mindist
+                        lane.correction_links[i,j,k,1] = true
                     end
-                elseif k == Z && any(!iszero,@view lane.fields[i,j,k,1:2,:]) &&
+                # Backwall
+                elseif k == Z && any(!iszero,@view lane.messages[i,j,k,1:2,:]) &&
                        rand(decoder_rng) < 0.8
-                    mindist = minimum(lane.fields[i,j,k,1:2,:][lane.fields[i,j,k,1:2,:] .> 0])
-                    if lane.fields[i,j,k,1,1] == mindist
-                        lane.proposals[ind(i-1),j,k,1] = true
-                    elseif lane.fields[i,j,k,2,1] == mindist
-                        lane.proposals[i,ind(j-1),k,2] = true
-                    elseif lane.fields[i,j,k,2,2] == mindist
-                        lane.proposals[i,j,k,2] = true
-                    elseif lane.fields[i,j,k,1,2] == mindist
-                        lane.proposals[i,j,k,1] = true
+                    mindist = minimum(lane.messages[i,j,k,1:2,:][lane.messages[i,j,k,1:2,:] .> 0])
+                    if lane.messages[i,j,k,1,1] == mindist
+                        lane.correction_links[ind(i-1),j,k,1] = true
+                    elseif lane.messages[i,j,k,2,1] == mindist
+                        lane.correction_links[i,ind(j-1),k,2] = true
+                    elseif lane.messages[i,j,k,2,2] == mindist
+                        lane.correction_links[i,j,k,2] = true
+                    elseif lane.messages[i,j,k,1,2] == mindist
+                        lane.correction_links[i,j,k,1] = true
                     end
                 end
             end
         end
     end
 
-    post = junction.post_target
+    # Post-CNOT lane
+    post_cnot_lane = junction.post_cnot_target_lane
     if g > 0
         for i in 1:L, j in 1:L, k in 1:g
-            if !post.hist[i,j,k] || !any(!iszero,@view post.fields[i,j,k,:,:])
+            if !post_cnot_lane.defects[i,j,k] ||
+               !any(!iszero,@view post_cnot_lane.messages[i,j,k,:,:])
                 continue
             end
-            mindist = minimum(post.fields[i,j,k,:,:][post.fields[i,j,k,:,:] .> 0])
-            if post.fields[i,j,k,3,2] == mindist
+            positive_messages = post_cnot_lane.messages[i,j,k,:,:][
+                post_cnot_lane.messages[i,j,k,:,:] .> 0
+            ]
+            mindist = minimum(positive_messages)
+            # Move in time direction
+            if post_cnot_lane.messages[i,j,k,3,2] == mindist
+                # Inside trunk, regular move
                 if k < g
-                    post.proposals[i,j,k,3] = true
+                    post_cnot_lane.correction_links[i,j,k,3] = true
+                # At the junction, choose a branch
                 else
-                    branch = choose_junction_branch!(state,junction,i,j)
-                    junction.junction_proposals[i,j] = branch
-                    if branch == Y_PRE_CONTROL
-                        state.control_branch_crossings += 1
-                    elseif branch == Y_PRE_TARGET
-                        state.target_branch_crossings += 1
+                    lane_id = select_target_junction_pre_cnot_lane!(state,junction,i,j)
+                    junction.branch_choices[i,j] = lane_id
+                    if lane_id == PRE_CNOT_CONTROL_LANE_ID
+                        state.pre_cnot_control_crossings += 1
+                    elseif lane_id == PRE_CNOT_TARGET_LANE_ID
+                        state.pre_cnot_target_crossings += 1
                     end
                 end
-            elseif post.fields[i,j,k,1,1] == mindist
-                post.proposals[ind(i-1),j,k,1] = true
-            elseif post.fields[i,j,k,2,1] == mindist
-                post.proposals[i,ind(j-1),k,2] = true
-            elseif post.fields[i,j,k,2,2] == mindist
-                post.proposals[i,j,k,2] = true
-            elseif post.fields[i,j,k,1,2] == mindist
-                post.proposals[i,j,k,1] = true
+            elseif post_cnot_lane.messages[i,j,k,1,1] == mindist
+                post_cnot_lane.correction_links[ind(i-1),j,k,1] = true
+            elseif post_cnot_lane.messages[i,j,k,2,1] == mindist
+                post_cnot_lane.correction_links[i,ind(j-1),k,2] = true
+            elseif post_cnot_lane.messages[i,j,k,2,2] == mindist
+                post_cnot_lane.correction_links[i,j,k,2] = true
+            elseif post_cnot_lane.messages[i,j,k,1,2] == mindist
+                post_cnot_lane.correction_links[i,j,k,1] = true
             end
         end
     end
     return nothing
 end
 
-function commit_yjunction_proposals!(junction::TargetYJunction,target_frame)
-    for lane in (junction.pre_control,junction.pre_target,junction.post_target)
-        commit_lane_proposals!(lane,target_frame)
+function commit_target_junction_correction_links!(junction::TargetJunctionDecoder,target_correction_frame)
+    """
+    atomically commits all target-lane and junction correction_links
+    inputs: active junction and the one shared target Pauli frame
+    output: nothing; updates frame parity and defect endpoints
+    each branch choice toggles the post endpoint and exactly one pre-CNOT endpoint
+    """
+    # Regular
+    for lane in (
+        junction.pre_cnot_control_lane,
+        junction.pre_cnot_target_lane,
+        junction.post_cnot_target_lane,
+    )
+        commit_decoder_lane_correction_links!(lane,target_correction_frame)
     end
-    g = junction.junction_depth
-    _,_,Z = size(junction.post_target.hist)
+    # Cross junction
+    g = junction.interface_depth
+    _,_,Z = size(junction.post_cnot_target_lane.defects)
     if 1 <= g < Z
-        for i in axes(junction.junction_proposals,1),
-            j in axes(junction.junction_proposals,2)
-            branch = junction.junction_proposals[i,j]
-            if branch == Y_PRE_CONTROL || branch == Y_PRE_TARGET
-                junction.post_target.hist[i,j,g] ⊻= true
-                y_lane(junction,branch).hist[i,j,g+1] ⊻= true
+        for i in axes(junction.branch_choices,1),
+            j in axes(junction.branch_choices,2)
+            lane_id = junction.branch_choices[i,j]
+            if lane_id == PRE_CNOT_CONTROL_LANE_ID ||
+               lane_id == PRE_CNOT_TARGET_LANE_ID
+                junction.post_cnot_target_lane.defects[i,j,g] ⊻= true
+                get_target_junction_lane(junction,lane_id).defects[i,j,g+1] ⊻= true
             end
         end
     end
     return nothing
 end
 
-function clear_invalid_yjunction_slices!(junction::TargetYJunction)
-    _,_,Z = size(junction.post_target.hist)
-    g = junction.junction_depth
+function clear_target_junction_unowned_slices!(junction::TargetJunctionDecoder)
+    """
+    enforces moving-interface lane ownership
+    input: active junction at depth g
+    output: nothing; zeros post slices k > g and pre-branch slices k <= g,
+        including defects, messages, scratch messages, and correction links
+    """
+    _,_,Z = size(junction.post_cnot_target_lane.defects)
+    g = junction.interface_depth
     if g < Z
-        junction.post_target.hist[:,:,g+1:Z] .= false
-        junction.post_target.fields[:,:,g+1:Z,:,:] .= 0
-        junction.post_target.new_fields[:,:,g+1:Z,:,:] .= 0
-        junction.post_target.proposals[:,:,g+1:Z,:] .= false
+        junction.post_cnot_target_lane.defects[:,:,g+1:Z] .= false
+        junction.post_cnot_target_lane.messages[:,:,g+1:Z,:,:] .= 0
+        junction.post_cnot_target_lane.next_messages[:,:,g+1:Z,:,:] .= 0
+        junction.post_cnot_target_lane.correction_links[:,:,g+1:Z,:] .= false
     end
     if g > 0
-        for lane in (junction.pre_control,junction.pre_target)
-            lane.hist[:,:,1:g] .= false
-            lane.fields[:,:,1:g,:,:] .= 0
-            lane.new_fields[:,:,1:g,:,:] .= 0
-            lane.proposals[:,:,1:g,:] .= false
+        for lane in (junction.pre_cnot_control_lane,junction.pre_cnot_target_lane)
+            lane.defects[:,:,1:g] .= false
+            lane.messages[:,:,1:g,:,:] .= 0
+            lane.next_messages[:,:,1:g,:,:] .= 0
+            lane.correction_links[:,:,1:g,:] .= false
         end
     end
     return nothing
 end
 
-function collapse_yjunction!(state::YJunctionCNOTState,junction::TargetYJunction)
-    post = junction.post_target
-    _,_,Z = size(post.hist)
-    post.hist[:,:,Z] .⊻= junction.pre_control.hist[:,:,Z]
-    post.hist[:,:,Z] .⊻= junction.pre_target.hist[:,:,Z]
-    post.fields[:,:,Z,1:2,:] .= nonzeromin.(
-        post.fields[:,:,Z,1:2,:],
-        junction.pre_control.fields[:,:,Z,1:2,:],
-        junction.pre_target.fields[:,:,Z,1:2,:],
+function collapse_target_junction!(state::YJunctionState,junction::TargetJunctionDecoder)
+    """
+    collapses the active target Y-junction at g = Z
+    inputs: global state and active junction
+    output: nothing; xors both pre-CNOT defects into the post-CNOT back wall,
+        zero-aware-minimizes spatial messages, clears temporal/scratch state,
+        and replaces the target junction with the ordinary post-CNOT lane
+    """
+    post_cnot_lane = junction.post_cnot_target_lane
+    _,_,Z = size(post_cnot_lane.defects)
+    post_cnot_lane.defects[:,:,Z] .⊻=
+        junction.pre_cnot_control_lane.defects[:,:,Z]
+    post_cnot_lane.defects[:,:,Z] .⊻=
+        junction.pre_cnot_target_lane.defects[:,:,Z]
+    post_cnot_lane.messages[:,:,Z,1:2,:] .= nonzero_minimum.(
+        post_cnot_lane.messages[:,:,Z,1:2,:],
+        junction.pre_cnot_control_lane.messages[:,:,Z,1:2,:],
+        junction.pre_cnot_target_lane.messages[:,:,Z,1:2,:],
     )
-    post.fields[:,:,Z,3,:] .= 0
-    post.new_fields .= 0
-    post.proposals .= false
-    state.target_decoder = post
-    state.collapse_round = state.rounds + 1
+    post_cnot_lane.messages[:,:,Z,3,:] .= 0
+    post_cnot_lane.next_messages .= 0
+    post_cnot_lane.correction_links .= false
+    state.target_decoder = post_cnot_lane
+    state.collapse_round = state.completed_rounds + 1
     return nothing
 end
 
-function age_yjunction!(
-    state::YJunctionCNOTState,junction::TargetYJunction,new_event,
+function age_target_junction!(
+    state::YJunctionState,junction::TargetJunctionDecoder,new_event,
 )
-    _,_,Z = size(junction.post_target.hist)
-    for lane in (junction.pre_control,junction.pre_target,junction.post_target)
-        rg_cycle!(lane)
+    """
+    ages all three target lanes and advances the junction by one round
+    inputs: global state, active junction, and new observable target event
+    output: nothing; cycles lanes, inserts the post event, and collapses at g = Z
+    """
+    _,_,Z = size(junction.post_cnot_target_lane.defects)
+    for lane in (
+        junction.pre_cnot_control_lane,
+        junction.pre_cnot_target_lane,
+        junction.post_cnot_target_lane,
+    )
+        age_decoder_lane!(lane)
     end
-    junction.junction_depth += 1
-    junction.post_target.hist[:,:,1] .= new_event
-    if junction.junction_depth == Z
-        collapse_yjunction!(state,junction)
+    junction.interface_depth += 1
+    junction.post_cnot_target_lane.defects[:,:,1] .= new_event
+    if junction.interface_depth == Z
+        collapse_target_junction!(state,junction)
     else
-        clear_invalid_yjunction_slices!(junction)
+        clear_target_junction_unowned_slices!(junction)
     end
     return nothing
 end
 
-function update_yjunction_target!(
-    state::YJunctionCNOTState,junction::TargetYJunction,r,
-    data_mask,measurement_mask;decoder_rng=Random.default_rng(),
+function update_target_junction!(
+    state::YJunctionState,junction::TargetJunctionDecoder,r,
+    data_errors,measurement_errors;decoder_rng=Random.default_rng(),
 )
+    """
+    runs one synchronous target round while the junction is active
+    inputs: state, junction, message-sweep count r, explicit target masks,
+        and decoder_rng
+    output: nothing; performs Y messages, atomic feedback, one physical channel,
+        and junction aging in that order
+    """
     if r < 1
         error("Y-junction CNOT requires r >= 1")
     end
     for _ in 1:r
-        yjunction_field_sweep!(junction)
+        update_target_junction_messages!(junction)
     end
-    select_yjunction_proposals!(state,junction;decoder_rng=decoder_rng)
-    target = state.blocks[Y_TARGET_BLOCK]
-    commit_yjunction_proposals!(junction,target.frame)
-    new_event = apply_block_channel!(target,data_mask,measurement_mask)
-    age_yjunction!(state,junction,new_event)
+    select_target_junction_correction_links!(state,junction;decoder_rng=decoder_rng)
+    target_block = state.physical_blocks[TARGET_BLOCK_ID]
+    commit_target_junction_correction_links!(junction,target_block.correction_frame)
+    new_event = apply_noise_to_block!(
+        target_block,data_errors,measurement_errors,
+    )
+    age_target_junction!(state,junction,new_event)
     return nothing
 end
 
-function apply_cnot_x_yjunction!(
-    state::YJunctionCNOTState,
-    control_block=Y_CONTROL_BLOCK,
-    target_block=Y_TARGET_BLOCK,
+function apply_yjunction_cnot_x!(
+    state::YJunctionState,
+    control_block_id=CONTROL_BLOCK_ID,
+    target_block_id=TARGET_BLOCK_ID,
 )
-    if state.cnot_applied
+    """
+    applies the sole supported ideal X-sector CNOT from block 1 to block 2
+    inputs: pre-CNOT state and optional fixed control/target identifiers
+    output: nothing; xors the target errors, correction frame, and syndrome
+        registers with the control; moves the target lane into
+        pre_cnot_target_lane; snapshots control into pre_cnot_control_lane;
+        and creates an empty post-CNOT lane at g = 0
+    """
+    if state.has_applied_cnot
         error("the Y-junction prototype supports exactly one CNOT")
-    elseif control_block != Y_CONTROL_BLOCK || target_block != Y_TARGET_BLOCK ||
-           length(state.blocks) != 2
+    elseif control_block_id != CONTROL_BLOCK_ID ||
+           target_block_id != TARGET_BLOCK_ID ||
+           length(state.physical_blocks) != 2
         error("the Y-junction prototype supports block 1 -> block 2 only")
     elseif !(state.target_decoder isa DecoderLane)
-        error("target decoder is not in its pre-gate single-lane state")
+        error("target decoder is not in its pre-CNOT single-lane state")
     end
 
-    control = state.blocks[control_block]
-    target = state.blocks[target_block]
-    target.errors .⊻= control.errors
-    target.frame .⊻= control.frame
-    target.old_synds .⊻= control.old_synds
-    target.new_synds .⊻= control.new_synds
+    control_block = state.physical_blocks[control_block_id]
+    target_block = state.physical_blocks[target_block_id]
+    target_block.errors .⊻= control_block.errors
+    target_block.correction_frame .⊻= control_block.correction_frame
+    target_block.previous_syndrome .⊻= control_block.previous_syndrome
+    target_block.current_syndrome .⊻= control_block.current_syndrome
 
-    pre_control = snapshot_decoder_lane(state.control_history)
-    pre_target = state.target_decoder
-    pre_target.new_fields .= 0
-    pre_target.proposals .= false
-    L,_,Z = size(pre_target.hist)
-    post_target = make_decoder_lane(L,Z)
-    state.target_decoder = TargetYJunction(
-        pre_control,
-        pre_target,
-        post_target,
+    pre_cnot_control_lane = copy_decoder_lane(state.control_decoder)
+    pre_cnot_target_lane = state.target_decoder
+    pre_cnot_target_lane.next_messages .= 0
+    pre_cnot_target_lane.correction_links .= false
+    L,_,Z = size(pre_cnot_target_lane.defects)
+    post_cnot_target_lane = initialize_decoder_lane(L,Z)
+    state.target_decoder = TargetJunctionDecoder(
+        pre_cnot_control_lane,
+        pre_cnot_target_lane,
+        post_cnot_target_lane,
         0,
         zeros(Int,L,L,2),
-        fill(Y_NO_BRANCH,L,L),
+        fill(NO_LANE_ID,L,L),
     )
-    state.cnot_applied = true
-    state.cnot_round = state.rounds
+    state.has_applied_cnot = true
+    state.cnot_round = state.completed_rounds
     state.max_target_lane_count = 3
     return nothing
 end
 
-function update_yjunction_round!(
-    state::YJunctionCNOTState,r,p,q;
+function update_yjunction_state!(
+    state::YJunctionState,r,p,q;
     synch=true,pretty=false,masks=nothing,
     noise_rng=Random.default_rng(),decoder_rng=nothing,
 )
+    """
+    advances both observable blocks by one synchronous round
+    inputs: state, r, data rate p, measurement rate q, synchronous/pretty flags,
+        optional RoundNoiseMasks, noise_rng, and decoder_rng
+    output: the masks actually applied; mutates both blocks and decoder lanes
+    control uses the ordinary kernel; target uses the active Y kernel or the
+    ordinary post-collapse lane
+    """
     if !synch
         error("Y-junction CNOT supports synchronous updates only")
     elseif pretty
         error("Y-junction CNOT does not implement pretty updates")
     end
-    L = size(state.blocks[Y_CONTROL_BLOCK].errors,1)
+    L = size(state.physical_blocks[CONTROL_BLOCK_ID].errors,1)
     round_masks = masks === nothing ?
-        sample_yjunction_round_masks(noise_rng,L,p,q) :
-        validate_yjunction_round_masks(masks,L)
+        sample_round_noise_masks(noise_rng,L,p,q) :
+        validate_round_noise_masks(masks,L)
     if decoder_rng === nothing
         decoder_rng = Random.Xoshiro(rand(noise_rng,UInt64))
     end
 
-    update_live_lane!(
-        state.blocks[Y_CONTROL_BLOCK],
-        state.control_history,
+    update_decoder_lane!(
+        state.physical_blocks[CONTROL_BLOCK_ID],
+        state.control_decoder,
         r,
-        round_masks.data[Y_CONTROL_BLOCK],
-        round_masks.measurement[Y_CONTROL_BLOCK];
+        round_masks.data_errors[CONTROL_BLOCK_ID],
+        round_masks.measurement_errors[CONTROL_BLOCK_ID];
         decoder_rng=decoder_rng,
     )
 
-    target = state.blocks[Y_TARGET_BLOCK]
-    decoder = state.target_decoder
-    if decoder isa TargetYJunction
-        update_yjunction_target!(
-            state,decoder,r,
-            round_masks.data[Y_TARGET_BLOCK],
-            round_masks.measurement[Y_TARGET_BLOCK];
+    target_block = state.physical_blocks[TARGET_BLOCK_ID]
+    target_decoder = state.target_decoder
+    if target_decoder isa TargetJunctionDecoder
+        update_target_junction!(
+            state,target_decoder,r,
+            round_masks.data_errors[TARGET_BLOCK_ID],
+            round_masks.measurement_errors[TARGET_BLOCK_ID];
             decoder_rng=decoder_rng,
         )
     else
-        update_live_lane!(
-            target,decoder,r,
-            round_masks.data[Y_TARGET_BLOCK],
-            round_masks.measurement[Y_TARGET_BLOCK];
+        update_decoder_lane!(
+            target_block,target_decoder,r,
+            round_masks.data_errors[TARGET_BLOCK_ID],
+            round_masks.measurement_errors[TARGET_BLOCK_ID];
             decoder_rng=decoder_rng,
         )
     end
-    state.rounds += 1
+    state.completed_rounds += 1
     return round_masks
 end
 
-function all_yjunction_histories_empty(state::YJunctionCNOTState)
-    if any(state.control_history.hist)
+function has_no_decoder_defects(state::YJunctionState)
+    """
+    input: YJunctionState
+    output: true only when every currently owned decoder lane has no defects
+    """
+    if any(state.control_decoder.defects)
         return false
     end
-    decoder = state.target_decoder
-    if decoder isa TargetYJunction
-        return !any(decoder.pre_control.hist) &&
-               !any(decoder.pre_target.hist) &&
-               !any(decoder.post_target.hist)
+    target_decoder = state.target_decoder
+    if target_decoder isa TargetJunctionDecoder
+        return !any(target_decoder.pre_cnot_control_lane.defects) &&
+               !any(target_decoder.pre_cnot_target_lane.defects) &&
+               !any(target_decoder.post_cnot_target_lane.defects)
     end
-    return !any(decoder.hist)
+    return !any(target_decoder.defects)
 end
 
-yjunction_is_collapsed(state::YJunctionCNOTState) =
-    state.cnot_applied && state.target_decoder isa DecoderLane
-
-function yjunction_target_lane_count(state::YJunctionCNOTState)
-    return state.target_decoder isa TargetYJunction ? 3 : 1
+function is_target_junction_collapsed(state::YJunctionState)
+    """
+    input: YJunctionState
+    output: true if the CNOT occurred and the transient target junction collapsed
+    """
+    return state.has_applied_cnot && state.target_decoder isa DecoderLane
 end
 
-function yjunction_field_pair_count(state::YJunctionCNOTState)
-    return 1 + yjunction_target_lane_count(state)
+function count_target_decoder_lanes(state::YJunctionState)
+    """
+    input: YJunctionState
+    output: three target lanes while active, or one ordinary target lane otherwise
+    """
+    return state.target_decoder isa TargetJunctionDecoder ? 3 : 1
 end
 
-function decoded_yjunction_block(state::YJunctionCNOTState,block)
-    return state.blocks[block].errors .⊻ state.blocks[block].frame
+function count_decoder_message_buffer_pairs(state::YJunctionState)
+    """
+    input: YJunctionState
+    output: total control-plus-target count of messages/next_messages lane pairs
+    """
+    return 1 + count_target_decoder_lanes(state)
+end
+
+function compute_decoded_block_edges(state::YJunctionState,block_id)
+    """
+    inputs: global state and observable block identifier
+    output: local decoded edge configuration: errors xor correction frame
+    """
+    physical_block = state.physical_blocks[block_id]
+    return physical_block.errors .⊻ physical_block.correction_frame
 end
 
 function split_cnot_timing(total_time)
+    """
+    splits total noisy time into floor/ceiling pre/post intervals
+    input: positive total noisy time T
+    output: T_PRE, T_POST, and a 2T cleanup cap
+    """
     if total_time < 1
         error("CNOT total time T must be positive")
     end
@@ -843,10 +1145,22 @@ function split_cnot_timing(total_time)
     return pre_time,post_time,2total_time
 end
 
-function estimate_yjunction_cnot_Ft(
+function estimate_yjunction_cnot_fidelity(
     L,Z,p,q,r,synch,pretty,T_PRE,T_POST,CLEANUP_TIME,
     acc_err,fixed_samps,trial_parallel,verbose,
 )
+    """
+    estimates joint control/target CNOT fixed-time fidelity
+    inputs:
+        L,Z: lattice size and buffer depth
+        p,q,r: data rate, measurement rate, and message-update ratio
+        synch,pretty: only true,false is supported
+        T_PRE,T_POST,CLEANUP_TIME: protocol schedule
+        acc_err,fixed_samps: failure-accumulation or fixed-sample stopping rule
+        trial_parallel,verbose: trial threading and progress controls
+    output: dictionary of logical, cleanup, crossing, collapse, memory, runtime,
+        and lane-count metrics
+    """
     if !synch
         error("2d_windowed_cnot_yjunction.jl supports SYNCH=true only")
     elseif pretty
@@ -879,9 +1193,9 @@ function estimate_yjunction_cnot_Ft(
         both_failures = 0
         cleanup_failures = 0
         collapse_failures = 0
-        control_crossings = 0
-        target_crossings = 0
-        equal_ties = 0
+        pre_cnot_control_crossings = 0
+        pre_cnot_target_crossings = 0
+        equal_branch_cost_ties = 0
         collapse_delay_sum = 0
         collapsed_trials = 0
         gate_bytes_sum = 0
@@ -891,55 +1205,55 @@ function estimate_yjunction_cnot_Ft(
             if verbose && trials % 10000 == 0
                 println("thread $(threadid()) Y-junction trial: ",trials)
             end
-            state = initial_yjunction_state(L,Z)
+            state = initialize_yjunction_state(L,Z)
             for _ in 1:T_PRE
-                update_yjunction_round!(state,r,p,q)
+                update_yjunction_state!(state,r,p,q)
             end
-            apply_cnot_x_yjunction!(state)
+            apply_yjunction_cnot_x!(state)
             gate_bytes_sum += Base.summarysize(state)
             for _ in 1:T_POST
-                update_yjunction_round!(state,r,p,q)
+                update_yjunction_state!(state,r,p,q)
             end
             for _ in 1:CLEANUP_TIME
-                if all_yjunction_histories_empty(state) && yjunction_is_collapsed(state)
+                if has_no_decoder_defects(state) && is_target_junction_collapsed(state)
                     break
                 end
-                update_yjunction_round!(state,r,0.0,0.0)
+                update_yjunction_state!(state,r,0.0,0.0)
             end
 
-            history_cleanup_failed = !all_yjunction_histories_empty(state)
-            collapse_failed = !yjunction_is_collapsed(state)
-            cleanup_failures += history_cleanup_failed
+            defect_cleanup_failed = !has_no_decoder_defects(state)
+            collapse_failed = !is_target_junction_collapsed(state)
+            cleanup_failures += defect_cleanup_failed
             collapse_failures += collapse_failed
             if !collapse_failed
                 collapse_delay_sum += state.collapse_round - state.cnot_round
                 collapsed_trials += 1
             end
 
-            decoded_control = decoded_yjunction_block(state,Y_CONTROL_BLOCK)
-            decoded_target = decoded_yjunction_block(state,Y_TARGET_BLOCK)
-            if !history_cleanup_failed
-                @assert !any(get_synds(decoded_control)) "decoded control is not syndrome-free"
-                @assert !any(get_synds(decoded_target)) "decoded target is not syndrome-free"
+            decoded_control = compute_decoded_block_edges(state,CONTROL_BLOCK_ID)
+            decoded_target = compute_decoded_block_edges(state,TARGET_BLOCK_ID)
+            if !defect_cleanup_failed
+                @assert !any(compute_syndrome(decoded_control)) "decoded control is not syndrome-free"
+                @assert !any(compute_syndrome(decoded_target)) "decoded target is not syndrome-free"
             end
-            control_failed = !detect_logical_error(decoded_control)
-            target_failed = !detect_logical_error(decoded_target)
+            control_failed = !is_logically_trivial(decoded_control)
+            target_failed = !is_logically_trivial(decoded_target)
             logical_failed = control_failed || target_failed
 
             failures += logical_failed
             control_failures += control_failed
             target_failures += target_failed
             both_failures += control_failed && target_failed
-            control_crossings += state.control_branch_crossings
-            target_crossings += state.target_branch_crossings
-            equal_ties += state.equal_branch_ties
+            pre_cnot_control_crossings += state.pre_cnot_control_crossings
+            pre_cnot_target_crossings += state.pre_cnot_target_crossings
+            equal_branch_cost_ties += state.equal_branch_cost_ties
             final_bytes_sum += Base.summarysize(state)
             trials += 1
         end
         return (
             failures,trials,control_failures,target_failures,both_failures,
-            cleanup_failures,collapse_failures,control_crossings,
-            target_crossings,equal_ties,collapse_delay_sum,collapsed_trials,
+            cleanup_failures,collapse_failures,pre_cnot_control_crossings,
+            pre_cnot_target_crossings,equal_branch_cost_ties,collapse_delay_sum,collapsed_trials,
             gate_bytes_sum,final_bytes_sum,
         )
     end
@@ -990,33 +1304,50 @@ function estimate_yjunction_cnot_Ft(
 end
 
 function run_yjunction_sanity_checks(L,Z,r,T_PRE,T_POST,CLEANUP_TIME)
-    state = initial_yjunction_state(L,Z)
+    """
+    runs a zero-noise end-to-end assertion path
+    inputs: L,Z,r and the pre/post/cleanup schedule
+    output: nothing; checks gate activation, non-aliasing, collapse, cleanup,
+        and trivial logical readout
+    """
+    state = initialize_yjunction_state(L,Z)
     for _ in 1:T_PRE
-        update_yjunction_round!(state,r,0.0,0.0)
+        update_yjunction_state!(state,r,0.0,0.0)
     end
-    apply_cnot_x_yjunction!(state)
-    @assert state.target_decoder isa TargetYJunction
-    @assert state.target_decoder.pre_control.hist !== state.control_history.hist
+    apply_yjunction_cnot_x!(state)
+    @assert state.target_decoder isa TargetJunctionDecoder
+    @assert state.target_decoder.pre_cnot_control_lane.defects !== state.control_decoder.defects
     for _ in 1:T_POST
-        update_yjunction_round!(state,r,0.0,0.0)
+        update_yjunction_state!(state,r,0.0,0.0)
     end
     for _ in 1:CLEANUP_TIME
-        if all_yjunction_histories_empty(state) && yjunction_is_collapsed(state)
+        if has_no_decoder_defects(state) && is_target_junction_collapsed(state)
             break
         end
-        update_yjunction_round!(state,r,0.0,0.0)
+        update_yjunction_state!(state,r,0.0,0.0)
     end
-    @assert yjunction_is_collapsed(state)
-    @assert all_yjunction_histories_empty(state)
-    @assert detect_logical_error(decoded_yjunction_block(state,Y_CONTROL_BLOCK))
-    @assert detect_logical_error(decoded_yjunction_block(state,Y_TARGET_BLOCK))
+    @assert is_target_junction_collapsed(state)
+    @assert has_no_decoder_defects(state)
+    @assert is_logically_trivial(compute_decoded_block_edges(state,CONTROL_BLOCK_ID))
+    @assert is_logically_trivial(compute_decoded_block_edges(state,TARGET_BLOCK_ID))
     println("Y-junction sanity checks passed")
     return nothing
 end
 
-parse_bool(value) = lowercase(value) in ("1","true","yes","on")
+function parse_boolean(value)
+    """
+    input: string-like environment value
+    output: true for 1, true, yes, or on after lowercasing; false otherwise
+    """
+    return lowercase(value) in ("1","true","yes","on")
+end
 
 function write_yjunction_output(path,params,data)
+    """
+    writes sorted result and parameter sections to a text file
+    inputs: path, parameter dictionary, and result dictionary
+    output: absolute written path; creates missing parent directories
+    """
     output_path = abspath(path)
     mkpath(dirname(output_path))
     open(output_path,"w") do io
@@ -1034,9 +1365,15 @@ function write_yjunction_output(path,params,data)
 end
 
 function main()
+    """
+    environment-driven command-line entry point
+    inputs: MODE and lattice/noise/timing/sample settings from ENV
+    output: nothing; runs CNOT_Ft or CNOT_DEBUG, prints metrics, and optionally
+        writes OUTPUT_FILE
+    """
     mode = get(ENV,"MODE","CNOT_Ft")
     L = parse(Int,get(ENV,"LVAL",mode == "CNOT_DEBUG" ? "3" : "13"))
-    logz = parse_bool(get(ENV,"LOGZ","true"))
+    logz = parse_boolean(get(ENV,"LOGZ","true"))
     Z = parse(Int,get(ENV,"ZVAL",string(
         logz ? ceil(Int,log(1.5,L)) : ceil(Int,L/4),
     )))
@@ -1044,8 +1381,8 @@ function main()
     qrat = parse(Float64,get(ENV,"QRAT","1.0"))
     q = p * qrat
     r = parse(Int,get(ENV,"RVAL","3"))
-    synch = parse_bool(get(ENV,"SYNCH","true"))
-    pretty = parse_bool(get(ENV,"PRETTY","false"))
+    synch = parse_boolean(get(ENV,"SYNCH","true"))
+    pretty = parse_boolean(get(ENV,"PRETTY","false"))
     total_time = parse(Int,get(ENV,"TVAL",string(L)))
     default_pre,default_post,default_cleanup = split_cnot_timing(total_time)
     T_PRE = parse(Int,get(ENV,"CNOT_T_PRE",string(default_pre)))
@@ -1056,8 +1393,8 @@ function main()
     cleanup_time = parse(Int,get(ENV,"CLEANUP_TIME",string(default_cleanup)))
     fixed_samps = parse(Int,get(ENV,"SAMPS",get(ENV,"CNOT_SAMPS","0")))
     acc_err = parse(Int,get(ENV,"ACC_ERRORS","100"))
-    trial_parallel = parse_bool(get(ENV,"TRIAL_PARALLEL","true"))
-    verbose = parse_bool(get(ENV,"VERBOSE","false"))
+    trial_parallel = parse_boolean(get(ENV,"TRIAL_PARALLEL","true"))
+    verbose = parse_boolean(get(ENV,"VERBOSE","false"))
 
     if mode == "CNOT_DEBUG"
         run_yjunction_sanity_checks(L,Z,r,T_PRE,T_POST,cleanup_time)
@@ -1066,7 +1403,7 @@ function main()
         error("Y-junction driver supports MODE=CNOT_Ft or MODE=CNOT_DEBUG")
     end
 
-    data = estimate_yjunction_cnot_Ft(
+    data = estimate_yjunction_cnot_fidelity(
         L,Z,p,q,r,synch,pretty,T_PRE,T_POST,cleanup_time,
         acc_err,fixed_samps,trial_parallel,verbose,
     )

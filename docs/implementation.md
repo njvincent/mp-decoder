@@ -1,6 +1,6 @@
 # mp-decoder Implementation Documentation
 
-Last updated: 2026-07-17
+Last updated: 2026-07-28
 
 This document describes the implemented Julia behavior, with emphasis on state
 ownership, update order, and classical overhead. The Markdown paper notes
@@ -25,26 +25,44 @@ The repository has two decoder-code lineages:
         byte-identical to the serial file.
       - Parallelism is across independent trials, not within a decoder round.
 
-   3. CNOT extensions that retain the same legacy `update!`
+   3. Configurable trial-parallel memory driver: `2d_windowed_baseline.jl`
+
+      - Retains the same one-block decoder update rules and trial-level
+        parallelism.
+      - Exposes only the fixed-time `Ft` experiment; legacy `hist`, `erode`,
+        `quench`, `trel`, and `stats` branches are not present in this file.
+      - In `Ft` mode, accepts independent noisy and ideal-cleanup durations
+        through `UPDATE_TIME` and `CLEANUP_TIME`.
+      - Supports either failure-limited or fixed-trial sampling through
+        `STOP_MODE`.
+
+   4. CNOT extensions that retain the same legacy `update!`
 
       1. Primitive merge: `2d_windowed_cnot_primitive.jl`
 
          - Keeps two baseline decoder states and merges control state directly
            into the target at the gate.
 
-      2. Legacy sheet-copy: `2d_windowed_cnot_sheetcopy.jl`
+      2. Consecutive primitive merge: `cnot_primitive_consecutive.jl`
+
+         - Keeps independent decoder blocks for an ordered list of controls
+           and one persistent target.
+         - Accepts every noisy interval independently through
+           `CNOT_INTERVALS`.
+
+      3. Legacy sheet-copy: `2d_windowed_cnot_sheetcopy.jl`
 
          - Keeps one complete baseline decoder state per lineage sheet and
            calls `update!` once per sheet.
 
-      3. Physical snapshot: `2d_windowed_cnot_snapshot.jl`
+      4. Physical snapshot: `2d_windowed_cnot_snapshot.jl`
 
          - Keeps exactly one physical error/syndrome channel per observable
            block and separate pre-/post-gate decoder histories.
          - Routes recovery contributions with `applies_to::BitVector` rather
            than deep-copying physical sheets.
 
-      4. Two-pass causal junction: `2d_windowed_cnot_twopass.jl`
+      5. Two-pass causal junction: `2d_windowed_cnot_twopass.jl`
 
          - Keeps two physical blocks, a continuous control decoder, and three
            labeled target-output history streams connected at the CNOT.
@@ -53,7 +71,7 @@ The repository has two decoder-code lineages:
          - Owns the required synchronous baseline kernel copied from the
            primitive lineage; it imports no other CNOT driver.
 
-      5. Moving Y-junction: `2d_windowed_cnot_yjunction.jl`
+      6. Moving Y-junction: `2d_windowed_cnot_yjunction.jl`
 
          - Keeps two pre-gate target branches only above a moving CNOT
            interface and one unlabeled post-gate target lane below it.
@@ -360,6 +378,36 @@ Random trajectories are not bitwise stable across thread counts because trial
 assignment and random-number consumption change. `TRIAL_PARALLEL=false`
 forces one trial worker even when Julia has multiple threads.
 
+`2d_windowed_baseline.jl` is an `Ft`-only configurable trial-parallel driver;
+setting `MODE` to any other value is an error. Each process runs one timing
+pair. `UPDATE_TIME` and `CLEANUP_TIME` are nonnegative
+multipliers of `L`, not absolute round counts. They default to `1` and `2`,
+respectively. The driver resolves each duration independently with
+`round(Int, factor * L)`, so fractional multipliers are accepted. Output
+filenames include both `_Fu<factor>_Fc<factor>` and the resolved
+`_Tu<rounds>_Tc<rounds>`; both forms are also written under `### params ###`.
+
+The same driver accepts a positive `BUFFER_DEPTH` multiplier, defaulting to
+`1`. With the default `LOGZ=true`, it resolves the history depth as
+`Z = ceil(Int, BUFFER_DEPTH * log(1.5,L))`. When `LOGZ=false`, the corresponding
+rule is `Z = ceil(Int, BUFFER_DEPTH * L/4)`. The factor is stored as
+`buffer_depth_factor`, the resolved depth remains `Z`, and `Ft` filenames add
+`_B<factor>`. The batch scan exposes this dimension as `BUFFER_DEPTH_LIST` and
+submits each `(p,L,buffer,update,cleanup)` combination once. Results are grouped
+under one directory per `(update,cleanup,buffer)` factor tuple, named
+`update_<factor>L_cleanup_<factor>L_buffer_<factor>xlog1.5L` when `LOGZ=true`
+and ending in `xLdiv4` when `LOGZ=false`. The scan has no separate repeat
+dimension or repeat subdirectories.
+
+`STOP_MODE=failures` runs until exactly `ACC_ERRORS` logical failures have been
+accumulated across the worker targets. `STOP_MODE=trials` instead runs exactly
+`MAX_TRIALS` trials. The defaults are `failures`, `ACC_ERRORS=1000`, and
+`MAX_TRIALS=100000`. Workers receive integer quotas whose sum is the requested
+target, including when the target is not divisible by the worker count. Result
+data records integer `failures` and `trials` arrays in addition to `Ft`.
+The batch script exports and displays only the active target: `MAX_TRIALS` in
+trial mode or `ACC_ERRORS` in failure mode.
+
 ## 4. CNOT Decoder Family
 
 ### 4.1 Common experiment lifecycle
@@ -387,12 +435,44 @@ T            = L
 For odd `T`, the extra noisy round is post-gate. The primitive driver also
 accepts paired `CNOT_T_PRE` and `CNOT_T_POST` overrides; the sheet-copy and
 block drivers use the split above. All accept a `CLEANUP_TIME` override.
+Alternatively, primitive accepts paired `CNOT_T_PRE_FRACTION` and
+`CNOT_T_POST_FRACTION` values between zero and one. The requested fractions
+must sum to one. It resolves `T_PRE = floor(T * pre_fraction)` and assigns the
+remaining noisy rounds to `T_POST`, so `T_PRE + T_POST = T` for every lattice
+size. Round and fraction overrides are mutually exclusive. Result parameters
+record the requested fraction specifications, numeric requested fractions,
+resolved round counts, and resolved fractions. If `OUT_ADJ` is not supplied,
+an overridden schedule adds `_Tpre<rounds>_Tpost<rounds>` to the filename.
 
-The CNOT fidelity estimators either run exactly `SAMPS` trials or accumulate
-`ACC_ERRORS` failed trials. Trial-level threading is enabled by default.
-Each trial reports control, target, joint, and cleanup counts.
+`jobs/cnot_primitive_split_scan.sh` treats the split as a Slurm-array
+dimension. Its `CNOT_SPLITS` setting is a space-separated list of exact
+`PRE:POST` pairs and defaults to:
 
-For all current CNOT models:
+~~~text
+1:0  0:1  1/2:1/2  1/4:3/4  3/4:1/4
+~~~
+
+The script validates every pair before submission and writes each split under
+its own directory in `results/cnot_primitive/split_scan`, using names such as
+`T_CNOT_0`, `Tdiv2_CNOT_Tdiv2`, and `Tdiv4_CNOT_3Tdiv4`.
+It exposes the same stopping interface as `2d_windowed_baseline.jl`:
+`STOP_MODE=failures` uses `ACC_ERRORS`, while `STOP_MODE=trials` uses
+`MAX_TRIALS`. The script defaults to failure stopping and exports only the
+active target.
+The primitive executable accepts only `MODE=CNOT_Ft`; its former memory,
+visualization, and debug modes have been removed.
+
+The primitive estimator defaults to `STOP_MODE=failures`,
+`ACC_ERRORS=1000`. Trial stopping defaults to `MAX_TRIALS=100000`. Workers
+receive integer quotas whose sum is exactly the requested target. Result
+filenames include `_fail<target>` or `_trials<target>`, and result data includes
+both `failures` and `trials` in addition to the detailed control, target, joint,
+and cleanup counts. A positive legacy `SAMPS` value still selects trial
+stopping for direct driver invocations, but the split-scan script uses only
+`STOP_MODE` and `MAX_TRIALS`. Failure stopping at `p=q=0` is rejected because
+it cannot terminate.
+
+For the two-block CNOT models:
 
 ~~~text
 logical_failure =
@@ -401,6 +481,13 @@ logical_failure =
 
 `cleanup_failures` is a separate statistic and is not ORed into
 `logical_failure`.
+
+The consecutive primitive driver instead uses:
+
+~~~text
+logical_failure =
+    any(control_logical_failures) || target_logical_failure
+~~~
 
 ### 4.2 Primitive CNOT
 
@@ -443,7 +530,7 @@ new_fields_c        = 0
 new_fields_t        = 0
 ~~~
 
-After the gate helper returns, the trial/demo driver clears both
+After the gate helper returns, the fidelity driver clears both
 `hist_correction` scratch arrays. Normal two-block updates then resume.
 
 The target retains only one Boolean history and one componentwise-minimized
@@ -475,6 +562,55 @@ blocks therefore do not increase memory with gate count. Each gate still
 performs full-array XOR, field merge, and buffer clears. With `W` trial
 workers, the leading CNOT working set is `2W M_block`, plus small decoded-state
 and orchestration buffers.
+
+#### 4.2.4 Consecutive primitive driver
+
+`cnot_primitive_consecutive.jl` packages the eight persistent arrays of one
+baseline decoder into `DecoderBlock`. `make_decoder_block(L,Z)` allocates fresh
+storage, and `run_cnot_trials` constructs one independently allocated block per
+control plus one target block. A round calls `update_block!` once on every
+control and once on the target. The calls sample separate noise; the number of
+controls does not multiply the target's physical-noise or measurement stream.
+
+`CNOT_INTERVALS` is a comma- or whitespace-separated list of nonnegative,
+absolute round counts. A list `[I1,I2,...,I(N+1)]` creates `N` controls and
+runs:
+
+~~~text
+I1 rounds on C1,...,CN,T; C1 -> T
+I2 rounds on C1,...,CN,T; C2 -> T
+...
+IN rounds on C1,...,CN,T; CN -> T
+I(N+1) rounds on C1,...,CN,T
+CLEANUP_TIME ideal rounds on all blocks
+~~~
+
+For example, a bash job can export `CNOT_INTERVALS="${T},${T},${T}"` for
+`T; C1 -> T; T; C2 -> T; T`. If the variable is absent, the driver uses that
+two-CNOT schedule with `T=TVAL`, defaulting to `L`. Automatic cleanup remains
+`2T`; `CLEANUP_TIME` can override it independently.
+
+`jobs/cnot_primitive_consecutive_initial.sh` defines the editable Bash array
+`CNOT_INTERVAL_FACTORS=(1 1 1)`. Each entry resolves independently as
+`floor(TVAL * factor)` for every lattice-size task. Factors may be nonnegative
+integers or fractions, the array must contain at least two entries, and the
+control count is one less than its length. Results are grouped by the requested
+factor schedule and repeat index; Julia filenames record the resolved interval
+vector.
+
+Every gate applies the ordinary primitive merge to the same target
+`DecoderBlock`. Thus the target's state, correction, syndrome registers,
+history, and fields after one gate are the inputs to its next interval and
+gate. Controls remain separate throughout. The result records the resolved
+interval vector, CNOT count, total noisy rounds, per-control logical-failure
+counts, any-control failures, target failures, joint any-control/target
+failures, and cleanup failures. Output filenames include
+`_seq<N>_I<I1>-...-<I(N+1)>`.
+
+For `N` controls and one target, one worker uses `(N+1) M_block` persistent
+decoder state, each round costs `(N+1) U_block`, and each gate costs
+`Theta(NZ)`. Storage is linear in the number of live logical blocks and does
+not grow with the number of gates applied to the existing target.
 
 ### 4.3 Legacy sheet-copy CNOT
 
@@ -828,97 +964,136 @@ asynchronous path, Z sector, gate noise, or general circuit interface.
 #### 4.5.1 State and gate
 
 `2d_windowed_cnot_yjunction.jl` is a standalone synchronous derivative of the
-primitive kernel. It separates two observable physical blocks from decoder
-evidence:
+primitive kernel. It uses one vocabulary throughout: physical information is
+stored in block states, while decoding information is stored in lanes.
 
 ~~~text
-YPhysicalBlock:
-    errors, frame, old_synds, new_synds,
-    noise_rounds, measurement_rounds
+PhysicalBlockState:
+    block_id, errors, correction_frame,
+    previous_syndrome, current_syndrome,
+    data_noise_rounds, measurement_noise_rounds
 
 DecoderLane:
-    hist, fields, new_fields, proposals
+    defects, messages, next_messages, correction_links
+
+YJunctionState:
+    physical_blocks, control_decoder, target_decoder
+
+TargetJunctionDecoder:
+    pre_cnot_control_lane, pre_cnot_target_lane, post_cnot_target_lane,
+    interface_depth, branch_crossing_costs, branch_choices
 ~~~
+
+Function names follow one verb contract:
+
+- `initialize_*` and `copy_*` construct state;
+- `sample_*`, `validate_*`, and `apply_*` manage noise and transformations;
+- `compute_*`, `get_*`, and `reduce_*` are non-mutating;
+- `update_*`, `select_*`, and `commit_*` are mutating pipeline stages;
+- `age_*`, `clear_*`, and `collapse_*` manage the junction lifecycle;
+- `is_*`, `has_*`, and `count_*` are state queries.
+
+The ordinary and active-target pipelines use parallel names:
+
+~~~text
+ordinary DecoderLane                active TargetJunctionDecoder
+compute_decoder_lane_site_messages  compute_target_junction_site_messages
+update_decoder_lane_messages!       update_target_junction_messages!
+select_decoder_lane_correction_links!  select_target_junction_correction_links!
+commit_decoder_lane_correction_links!  commit_target_junction_correction_links!
+update_decoder_lane!                update_target_junction!
+~~~
+
+`update_yjunction_state!` is the one-round dispatcher. It always calls
+`update_decoder_lane!` for the control, then calls either
+`update_decoder_lane!` or `update_target_junction!` for the target according to
+the runtime type of `target_decoder`.
 
 Before the CNOT, control and target each own one ordinary `DecoderLane`. At the
 gate, the target physical arrays transform as
 
 ~~~text
-errors[target]     xor= errors[control]
-frame[target]      xor= frame[control]
-old_synds[target]  xor= old_synds[control]
-new_synds[target]  xor= new_synds[control]
+errors[target]             xor= errors[control]
+correction_frame[target]   xor= correction_frame[control]
+previous_syndrome[target]  xor= previous_syndrome[control]
+current_syndrome[target]   xor= current_syndrome[control]
 ~~~
 
-The target lane becomes `pre_target`; a non-aliased snapshot of the control
-history and current field becomes `pre_control`; and a fresh empty
-`post_target` lane is allocated. Scratch fields and proposals start empty. The
-continuous control decoder is unchanged, and the gate creates no noise,
-measurement, correction, or artificial history event.
+The target lane becomes `pre_cnot_target_lane`; a non-aliased snapshot of the
+control decoder's defects and current messages becomes
+`pre_cnot_control_lane`; and a fresh empty `post_cnot_target_lane` is
+allocated. Next-message buffers and correction links start empty. The
+continuous `control_decoder` is unchanged, and the gate creates no noise,
+measurement, correction, or artificial defect event.
 
-All target lanes update one shared observable target frame. The copied control
-lane contains no separate physical state or correction chain. Exactly one data
-mask and one measurement mask are sampled per physical block per round through
-the `YJunctionRoundMasks` interface.
+All target lanes update one shared observable target correction frame. The
+copied control lane contains no separate physical state or correction chain.
+Exactly one data mask and one measurement mask are sampled per physical block
+per round through the `RoundNoiseMasks` interface.
 
-#### 4.5.2 Y-graph field and feedback rules
+#### 4.5.2 Y-graph message and correction-link rules
 
-At junction depth `g`, the post lane owns `k <= g`, while both pre-gate lanes
-independently own `k > g`. The junction starts at `g=0` and advances once per
-physical or cleanup round. Invalid lane slices are zero.
+At `interface_depth = g`, `post_cnot_target_lane` owns `k <= g`, while both
+pre-CNOT lanes independently own `k > g`. The junction starts at `g=0` and
+advances once per physical or cleanup round. Unowned lane slices are zero.
 
-Every field sweep is globally Jacobi over this branched topology. The inherited
-`3 x 3` candidate plane and 1-norm distance are unchanged. A post-side cone
-crossing from `g` to `g+1` evaluates both pre lanes and retains their smallest
-positive candidate. A pre-side cone crossing toward `g` evaluates the single
-post lane, so post messages advertise into both branches. The rule applies to
-all six field components. Only the merged distance is stored below the
-junction; zero still means no message.
+Every message sweep is globally Jacobi over this branched topology. The
+inherited `3 x 3` candidate plane and 1-norm distance are unchanged. A
+post-CNOT cone crossing from `g` to `g+1` evaluates both pre-CNOT lanes and
+retains their smallest positive candidate. A pre-CNOT cone crossing toward
+`g` evaluates the single post-CNOT lane, so post-CNOT messages advertise into
+both branches. The rule applies to all six message components. Only the merged
+distance is stored below the junction; zero still means no message.
 
 The two temporal branch costs at the interface are retained from the same
-frozen field state as the merged post message. If a post defect at `k=g`
-selects buffer motion, it crosses to exactly one pre endpoint: the smaller
-positive cost wins, with control first on an equal positive tie. A defect is
-never copied. Post defects below the interface move within the post lane;
-pre-gate defects retain ordinary one-way aging toward larger `k`.
+frozen message state as the merged post-CNOT message. If a post-CNOT defect at
+`k=g` selects buffer motion, it crosses to exactly one pre-CNOT endpoint. The
+smaller positive cost wins, with control first on an equal positive tie. A
+defect is never copied. Post-CNOT defects below the interface move within their
+lane; pre-CNOT defects retain ordinary one-way aging toward larger `k`.
 
-All ordinary and junction proposals are selected from frozen histories and
-committed atomically. The XOR parity of spatial proposals from every target
-lane updates the one target frame. The primitive priorities and spatial-only
-`0.8` stochastic back-wall rule are retained. After feedback, the one observed
-target syndrome change is inserted only into `post_target`.
+All ordinary correction links and branch choices are selected from frozen
+defects and committed atomically. The XOR parity of spatial correction links
+from every target lane updates the one target correction frame. The primitive
+priorities and spatial-only `0.8` stochastic back-wall rule are retained.
+After feedback, the one observed target syndrome change is inserted only into
+`post_cnot_target_lane`.
 
 #### 4.5.3 Collapse, readout, and interface
 
 After each round, all three lanes cycle toward the back wall and `g` advances.
-When `g=Z`, the unresolved pre-gate evidence is destructively collapsed:
+When `g=Z`, the unresolved pre-CNOT evidence is destructively collapsed:
 
 ~~~text
-post.hist[:,:,Z] xor=
-    pre_control.hist[:,:,Z] xor pre_target.hist[:,:,Z]
+post_cnot_target_lane.defects[:,:,Z] xor=
+    pre_cnot_control_lane.defects[:,:,Z] xor
+    pre_cnot_target_lane.defects[:,:,Z]
 
-post.fields[:,:,Z,spatial,:] =
-    nonzeromin(post, pre_control, pre_target)
+post_cnot_target_lane.messages[:,:,Z,spatial,:] = nonzero_minimum(
+    post_cnot_target_lane,
+    pre_cnot_control_lane,
+    pre_cnot_target_lane,
+)
 ~~~
 
-Post temporal back-wall fields and scratch are cleared. The state replaces the
-transition object with `post_target`, releasing both pre lanes. Subsequent
-target rounds use the ordinary baseline lane update. This is the only
-provenance-destroying merge and is a heuristic for residual clusters that
-survive the complete buffer.
+Post-CNOT temporal back-wall messages and scratch buffers are cleared. The
+state replaces the transition object with `post_cnot_target_lane`, releasing
+both pre-CNOT lanes. Subsequent target rounds use the ordinary lane update.
+This is the only provenance-destroying merge and is a heuristic for residual
+clusters that survive the complete buffer.
 
 Readout is local:
 
 ~~~text
-decoded_control = errors[control] xor frame[control]
-decoded_target  = errors[target]  xor frame[target]
+decoded_control = errors[control] xor correction_frame[control]
+decoded_target  = errors[target]  xor correction_frame[target]
 ~~~
 
-Cleanup continues with `p=q=0` until histories are empty and the junction has
-collapsed, subject to the configured cap. Nonempty-history cleanup failures
-and collapse failures are reported separately. The guarded driver accepts
+Cleanup continues with `p=q=0` until all decoder defects are empty and the
+junction has collapsed, subject to the configured cap. Nonempty-decoder
+cleanup failures and collapse failures are reported separately. The guarded driver accepts
 `MODE=CNOT_Ft` and `MODE=CNOT_DEBUG`, exposes
-`estimate_yjunction_cnot_Ft`, and rejects asynchronous, pretty, or second-gate
+`estimate_yjunction_cnot_fidelity`, and rejects asynchronous, pretty, or second-gate
 use. The scan scripts export an absolute `OUTPUT_FILE` for every array task;
 the driver creates its parent directory and writes the standard `### data ###`
 and `### params ###` result sections. Fixed-sample runs use `SAMPS` (with
@@ -1085,10 +1260,9 @@ algorithmic oracle rather than a matched physical model.
 
 ### 6.1 Validation and diagnostics
 
-The CNOT drivers expose `MODE=CNOT_DEBUG`:
+The CNOT drivers other than the primitive driver expose `MODE=CNOT_DEBUG`:
 
 ~~~bash
-MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_primitive.jl
 MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_sheetcopy.jl
 MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 julia --threads=1 2d_windowed_cnot_block.jl
 MODE=CNOT_DEBUG LVAL=3 LOGZ=false TVAL=2 CLEANUP_TIME=4 SYNCH=true \
@@ -1142,13 +1316,6 @@ julia --startup-file=no test/yjunction_runtests.jl
 julia --startup-file=no --check-bounds=yes test/yjunction_runtests.jl
 ~~~
 
-Primitive debug mode is intended to check XOR propagation, `nonzeromin`,
-field-buffer clearing, and zero-noise success. Its current sanity function uses
-`any(new_fields_c)` and `any(new_fields_t)` on integer arrays, however, which
-raises `TypeError: non-boolean (Int64) used in boolean context` on the current
-Julia version before the mode completes. This is a defect in the diagnostic
-assertion; it is not a passing primitive regression hook.
-
 The block regression suite checks:
 
 - ideal error/frame propagation and control preservation;
@@ -1180,13 +1347,11 @@ models and should not be compared as if both were physical-block counts.
   target fields instead.
 - Primitive clears both `new_fields` arrays at the gate and both
   `hist_correction` arrays in the driver.
-- Primitive `CNOT_DEBUG` currently aborts on an integer-array `any` assertion;
-  there is no clean end-to-end primitive debug hook until that assertion is
-  fixed.
-- The serial, threaded, and primitive drivers call `Alert.alert` unconditionally
-  at normal exit. The notification backend can make an otherwise completed
-  headless run exit with an external-command error. Sheet-copy and block use
-  the opt-in, exception-catching `safe_alert` path instead.
+- The serial and threaded legacy drivers call `Alert.alert` unconditionally at
+  normal exit. The notification backend can make an otherwise completed
+  headless run exit with an external-command error. The primitive, sheet-copy,
+  block, and configurable baseline drivers use opt-in, exception-catching
+  alerts instead.
 - Sheet-copy deep-copies only active control sheets, never prunes allocated
   sheets, and applies later noise once per sheet.
 - Snapshot CNOT supports one ideal X-sector gate, two blocks, and synchronous
