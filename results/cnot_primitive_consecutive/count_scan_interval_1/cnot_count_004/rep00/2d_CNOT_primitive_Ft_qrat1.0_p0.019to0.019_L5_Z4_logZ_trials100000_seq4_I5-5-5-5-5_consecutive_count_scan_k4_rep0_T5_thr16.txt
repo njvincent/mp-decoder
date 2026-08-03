@@ -1,0 +1,40 @@
+### data ###
+control_1_logical_failures = 37283
+CNOT_Ft = 0.06330999999999998
+logical_failures = 93669
+cleanup_failures = 435
+failures = 93669
+control_4_logical_failures = 37276
+control_2_logical_failures = 37356
+CNOT_fail_rate = 0.93669
+target_logical_failures = 69393
+any_control_logical_failures = 84550
+control_target_logical_failures = 60274
+trials = 100000
+control_3_logical_failures = 37461
+control_logical_failures = [37283, 37356, 37461, 37276]
+
+### params ###
+Z = 4
+T = 5
+mode = "CNOT_Ft"
+Ts = [5]
+CNOT_STYLE = "primitive"
+r = 3
+L = 5
+Ls = [5]
+CLEANUP_TIME = 10
+Zs = [4]
+logZ = true
+synch = true
+CNOT_COUNT = 4
+CNOT_INTERVALS = [5, 5, 5, 5, 5]
+max_trials = 100000
+ps = [0.019]
+julia_threads = 16
+NOISY_ROUNDS = 25
+trial_parallel = true
+CNOT_INTERVALS_SPEC = "5,5,5,5,5"
+stop_mode = "trials"
+p = 0.019
+qrat = 1.0
