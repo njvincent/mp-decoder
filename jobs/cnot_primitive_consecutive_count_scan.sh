@@ -2,7 +2,7 @@
 #SBATCH --job-name=cnot_consecutive_count
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
-#SBATCH --time=24:00:00
+#SBATCH --time=36:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -16,18 +16,35 @@ set -euo pipefail
 #   interval 1, C1 -> target, ..., interval 1, Ck -> target, interval 1.
 # As in cnot_primitive_consecutive_full.sh, factor 1 resolves to TVAL noisy rounds.
 
-# Set the largest consecutive-CNOT count to scan here. The scan includes every
-# count from 1 through MAX_CNOTS.
-MAX_CNOTS=5
+# Set the consecutive-CNOT counts to scan here, separated by spaces or commas.
+# The environment can override this list, for example CNOT_COUNTS="1 3 8".
+CNOT_COUNTS=${CNOT_COUNTS:-"5"}
+CNOT_COUNTS_NORMALIZED=${CNOT_COUNTS//,/ }
+CNOT_COUNT_LIST=()
+read -r -a CNOT_COUNT_LIST <<< "${CNOT_COUNTS_NORMALIZED}"
+NCNOT_COUNTS=${#CNOT_COUNT_LIST[@]}
 
 MODE=${1:-CNOT_Ft}
 NREPEATS=${2:-1}
 MAX_CONCURRENT=${3:-30}
 
-if [[ ! "${MAX_CNOTS}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "MAX_CNOTS must be a positive integer." >&2
+if (( NCNOT_COUNTS == 0 )); then
+    echo "CNOT_COUNTS must contain at least one positive integer." >&2
     exit 1
 fi
+for ((cnot_index = 0; cnot_index < NCNOT_COUNTS; cnot_index++)); do
+    cnot_count=${CNOT_COUNT_LIST[$cnot_index]}
+    if [[ ! "${cnot_count}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Every entry in CNOT_COUNTS must be a positive integer; got '${cnot_count}'." >&2
+        exit 1
+    fi
+    for ((prior_index = 0; prior_index < cnot_index; prior_index++)); do
+        if [[ "${cnot_count}" == "${CNOT_COUNT_LIST[$prior_index]}" ]]; then
+            echo "CNOT_COUNTS must not contain duplicates; got '${cnot_count}' more than once." >&2
+            exit 1
+        fi
+    done
+done
 if [[ ! "${NREPEATS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "NREPEATS must be a positive integer." >&2
     exit 1
@@ -54,7 +71,7 @@ if [[ "${JULIA_SCRIPT}" != /* ]]; then
 fi
 
 P_LIST=(${P_LIST:-0.006 0.007 0.008 0.009 0.010 0.011 0.012 0.013 0.014 0.015 0.016 0.017 0.018 0.019})
-L_LIST=(${L_LIST:-5 7 9 13 19})
+L_LIST=(${L_LIST:-19})
 QRAT=${QRAT:-1}
 RVAL=${RVAL:-3}
 SYNCH=${SYNCH:-true}
@@ -82,7 +99,7 @@ unset SAMPS
 NP=${#P_LIST[@]}
 NL=${#L_LIST[@]}
 NBASE_COMBOS=$((NP * NL))
-NCOMBOS_PER_REPEAT=$((NBASE_COMBOS * MAX_CNOTS))
+NCOMBOS_PER_REPEAT=$((NBASE_COMBOS * NCNOT_COUNTS))
 TOTAL_TASKS=$((NCOMBOS_PER_REPEAT * NREPEATS))
 
 if (( TOTAL_TASKS < 1 )); then
@@ -91,7 +108,7 @@ if (( TOTAL_TASKS < 1 )); then
 fi
 
 if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
-    export MAX_CNOTS
+    export CNOT_COUNTS="${CNOT_COUNT_LIST[*]}"
     export MODE
     export NREPEATS
     export MAX_CONCURRENT
@@ -121,7 +138,7 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     mkdir -p "${OUTPUT_DIR}"
 
     echo "Submitting ${TOTAL_TASKS} consecutive primitive-CNOT count-scan tasks"
-    echo "CNOT counts=1..${MAX_CNOTS}, interval factor=1"
+    echo "CNOT counts=(${CNOT_COUNT_LIST[*]}), interval factor=1"
     echo "mode=${MODE}, repeats=${NREPEATS}, threads/task=${THREADS_PER_TASK}, max concurrent=${MAX_CONCURRENT}"
     echo "L=(${L_LIST[*]}), p=(${P_LIST[*]}), qrat=${QRAT}, r=${RVAL}, synch=${SYNCH}, logZ=${LOGZ}"
     echo "TVAL=${TVAL_DEFAULT}, CLEANUP_TIME=${CLEANUP_TIME_DEFAULT}"
@@ -151,13 +168,13 @@ if (( SLURM_ARRAY_TASK_ID >= TOTAL_TASKS )); then
     exit 0
 fi
 
-CNOT_INDEX=$((SLURM_ARRAY_TASK_ID % MAX_CNOTS))
-BASE_COMBO_INDEX=$(((SLURM_ARRAY_TASK_ID / MAX_CNOTS) % NBASE_COMBOS))
+CNOT_INDEX=$((SLURM_ARRAY_TASK_ID % NCNOT_COUNTS))
+BASE_COMBO_INDEX=$(((SLURM_ARRAY_TASK_ID / NCNOT_COUNTS) % NBASE_COMBOS))
 REPEAT_INDEX=$((SLURM_ARRAY_TASK_ID / NCOMBOS_PER_REPEAT))
 P_INDEX=$((BASE_COMBO_INDEX % NP))
 L_INDEX=$((BASE_COMBO_INDEX / NP))
 
-CNOT_COUNT=$((CNOT_INDEX + 1))
+CNOT_COUNT=${CNOT_COUNT_LIST[$CNOT_INDEX]}
 PVAL=${P_LIST[$P_INDEX]}
 LVAL=${L_LIST[$L_INDEX]}
 
