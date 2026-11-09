@@ -810,3 +810,141 @@ def print_scaling_ansatz_fit(fit: ScalingAnsatzFit) -> None:
     print("Fitted parameters:", fit.parameters)
     print("Parameter standard deviations:", fit.parameter_errors)
     print("Weighted absolute residual:", fit.weighted_absolute_residual)
+
+
+# ---------------------------------------------------------------------------
+# Two-sector driver (cnot_primitive_xz.jl): per-unit decay fits and Lambda.
+# See plans/xz_noise_hub_cnot.md, Section 8.
+# ---------------------------------------------------------------------------
+
+# Failure probability of a fully randomized logical state: one toric block has
+# two logical qubits, i.e. four winding bits over both sectors (2**4 states),
+# and two bits per sector.
+P_MAX_BLOCK = 15 / 16
+P_MAX_SECTOR = 3 / 4
+
+
+@dataclass(frozen=True)
+class DecayFit:
+    """Per-unit logical error rate from P(n) = P_max [1 - B (1 - eps/P_max)^n]."""
+
+    eps: float
+    eps_error: float
+    intercept: float
+    chi2: float
+    dof: int
+
+
+@dataclass(frozen=True)
+class LambdaFit:
+    """Suppression factor from regressing ln(eps) on (L + 1) / 2."""
+
+    Lambda: float
+    Lambda_error: float
+    prefactor: float
+    chi2: float
+    dof: int
+
+
+def _weighted_line(x: np.ndarray, y: np.ndarray, sigma: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+    """Weighted least squares for y = a + b x; returns (params, covariance, chi2)."""
+
+    weights = 1.0 / sigma**2
+    design = np.vstack([np.ones_like(x), x]).T
+    covariance = np.linalg.inv(design.T @ (weights[:, None] * design))
+    params = covariance @ (design.T @ (weights * y))
+    residual = (y - design @ params) / sigma
+    return params, covariance, float(residual @ residual)
+
+
+def fit_decay_rate(
+    units: Sequence[float],
+    failures: Sequence[float],
+    trials: Sequence[float],
+    *,
+    p_max: float = P_MAX_BLOCK,
+) -> DecayFit:
+    """Google-style per-unit error rate.
+
+    ``units`` counts rounds (memory) or CNOT gates (hub). The fit is a weighted
+    straight line through ``y = ln(1 - P/p_max)`` against ``units``; the slope
+    gives ``eps = p_max (1 - e^slope)`` and the intercept ``B`` absorbs the
+    fixed preparation and readout cost. Points with no failures, or with
+    ``P >= p_max``, carry no slope information and are dropped.
+    """
+
+    n = np.asarray(units, dtype=float)
+    f = np.asarray(failures, dtype=float)
+    t = np.asarray(trials, dtype=float)
+    usable = (t > 0) & (f > 0)
+    probability = np.divide(f, t, out=np.zeros_like(f), where=t > 0)
+    usable &= probability < p_max
+    if usable.sum() < 2:
+        raise ValueError("a decay fit needs at least two unit counts with failures")
+    p_use = probability[usable]
+    sigma_p = np.sqrt(p_use * (1 - p_use) / t[usable])
+    y = np.log1p(-p_use / p_max)
+    sigma_y = sigma_p / (p_max - p_use)
+    params, covariance, chi2 = _weighted_line(n[usable], y, sigma_y)
+    slope = params[1]
+    eps = p_max * (1 - np.exp(slope))
+    eps_error = p_max * np.exp(slope) * np.sqrt(covariance[1, 1])
+    return DecayFit(
+        eps=float(eps),
+        eps_error=float(eps_error),
+        intercept=float(np.exp(params[0])),
+        chi2=chi2,
+        dof=int(usable.sum() - 2),
+    )
+
+
+def single_point_rate(failures: float, trials: float, units: float, *, p_max: float = P_MAX_BLOCK) -> tuple[float, float]:
+    """Per-unit rate from one experiment length (Google's single-point formula, generalized to ``p_max``)."""
+
+    probability = failures / trials
+    sigma = np.sqrt(probability * (1 - probability) / trials)
+    survival = 1 - probability / p_max
+    eps = p_max * (1 - survival ** (1 / units))
+    eps_error = survival ** (1 / units - 1) * sigma / units
+    return float(eps), float(eps_error)
+
+
+def fit_lambda(
+    L_values: Sequence[int],
+    eps: Sequence[float],
+    eps_error: Sequence[float],
+) -> LambdaFit:
+    """Google convention: slope ``m`` of ln(eps) against (L+1)/2 gives Lambda = e^-m."""
+
+    x = (np.asarray(L_values, dtype=float) + 1) / 2
+    e = np.asarray(eps, dtype=float)
+    s = np.asarray(eps_error, dtype=float)
+    usable = np.isfinite(e) & np.isfinite(s) & (e > 0) & (s > 0)
+    if usable.sum() < 2:
+        raise ValueError("a Lambda fit needs at least two sizes with positive rates")
+    params, covariance, chi2 = _weighted_line(x[usable], np.log(e[usable]), s[usable] / e[usable])
+    Lambda = float(np.exp(-params[1]))
+    return LambdaFit(
+        Lambda=Lambda,
+        Lambda_error=float(Lambda * np.sqrt(covariance[1, 1])),
+        prefactor=float(np.exp(params[0])),
+        chi2=chi2,
+        dof=int(usable.sum() - 2),
+    )
+
+
+def lambda_ratios(
+    L_values: Sequence[int],
+    eps: Sequence[float],
+    eps_error: Sequence[float],
+) -> list[tuple[int, int, float, float]]:
+    """Pairwise eps(L)/eps(L') for consecutive sizes, with propagated errors."""
+
+    out = []
+    for i in range(len(L_values) - 1):
+        a, b = eps[i], eps[i + 1]
+        if a > 0 and b > 0:
+            ratio = a / b
+            error = ratio * np.hypot(eps_error[i] / a, eps_error[i + 1] / b)
+            out.append((int(L_values[i]), int(L_values[i + 1]), float(ratio), float(error)))
+    return out

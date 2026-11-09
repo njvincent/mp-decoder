@@ -1,6 +1,6 @@
 # mp-decoder Agent Guide
 
-Last updated: 2026-07-08
+Last updated: 2026-11-08 (code map refreshed; earlier sections from 2026-07-08)
 
 ## Scope
 
@@ -64,6 +64,24 @@ sections and the existing implementation.
   - Keeps two observable physical blocks, separate pre-/post-gate decoder
     histories, and `applies_to` correction-routing vectors.
   - Currently supports one synchronous ideal X-sector CNOT.
+- `projects/mp-decoder/2d_windowed_baseline.jl`
+  - Configurable trial-parallel `Ft` baseline (update, cleanup, and buffer
+    factors; failure or trial stopping).
+- `projects/mp-decoder/cnot_primitive_consecutive.jl`
+  - Primitive CNOT with many controls and one persistent target
+    (`CNOT_INTERVALS`). X sector only; ideal instantaneous gates.
+- `projects/mp-decoder/2d_windowed_cnot_twopass.jl`,
+  `projects/mp-decoder/2d_windowed_cnot_yjunction.jl`
+  - Single-gate history-preserving CNOT prototypes (X sector only).
+- `projects/mp-decoder/cnot_primitive_xz.jl`
+  - Both error sectors per block, single-qubit depolarizing noise, measurement
+    noise, noisy CNOT rounds (two-qubit depolarizing, default `p2 = 10p`), and
+    the primitive rule mirrored per sector. It has a schedule engine
+    (`memory`, `consecutive`; `hub` planned) and a non-allocating kernel that
+    is bit-exact against legacy `update!`.
+  - Plan: `plans/xz_noise_hub_cnot.md`. Tests:
+    `test/cnot_primitive_xz_runtests.jl`. Local Stage-1 runner:
+    `jobs/cnot_primitive_xz_stage1_local.jl`.
 - `projects/mp-decoder/2d_windowed_history_visualizer.py`
   - History visualization support.
 - `projects/mp-decoder/2d_cnot_sheetcopy_visualizer.js`

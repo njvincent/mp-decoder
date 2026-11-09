@@ -1,6 +1,6 @@
 # mp-decoder Implementation Documentation
 
-Last updated: 2026-07-28
+Last updated: 2026-11-08
 
 This document describes the implemented Julia behavior, with emphasis on state
 ownership, update order, and classical overhead. The Markdown paper notes
@@ -80,10 +80,23 @@ The repository has two decoder-code lineages:
          - XOR-collapses the pre-gate branches into the ordinary target back
            wall after one buffer depth, returning to two decoder lanes.
 
+      7. Two-sector depolarizing primitive: `cnot_primitive_xz.jl`
+
+         - Tracks both error sectors (X and Z) of every block under
+           single-qubit depolarizing noise, measurement noise, and noisy
+           transversal CNOT rounds (Section 4.6).
+         - Applies the primitive rule mirrored per sector and runs schedules
+           (memory, consecutive) through one round engine.
+         - Keeps the legacy synchronous decoder rules in a non-allocating
+           form that is bit-exact against legacy `update!`.
+
 2. Block-level fork
 
    1. Block CNOT driver: `2d_windowed_cnot_block.jl`
 
+      - Not present in the working tree as of 2026-11-08, and the file has
+        no git history; `test/runtests.jl` still includes it. The block
+        descriptions in this document cannot currently be run or checked.
       - Keeps one observable decoder per physical block.
       - Preserves the synchronous feedback order but intentionally changes the
         asynchronous physical-round schedule.
@@ -102,7 +115,8 @@ change in one file does not propagate automatically to the others.
 
 ### 2.1 Physical and syndrome arrays
 
-All implementations track one toric-code error sector. The CNOT prototypes
+All implementations except `cnot_primitive_xz.jl` track one toric-code error
+sector; Section 4.6 describes the two-sector model. The other CNOT prototypes
 implement only the X-sector propagation
 
 ~~~text
@@ -597,6 +611,14 @@ integers or fractions, the array must contain at least two entries, and the
 control count is one less than its length. Results are grouped by the requested
 factor schedule and repeat index; Julia filenames record the resolved interval
 vector.
+
+`jobs/cnot_primitive_consecutive_count_scan.sh` scans an explicit
+`CNOT_COUNTS` list rather than an implicit range. The list accepts positive,
+unique integers separated by spaces or commas, preserves their specified order
+in the Slurm array mapping, and may be set in the script or overridden in the
+environment (for example, `CNOT_COUNTS="1 3 8"`). Every interval factor remains
+fixed at one, so a selected count `N` produces `N + 1` intervals of `TVAL`
+rounds and writes under `cnot_count_<N>`.
 
 Every gate applies the ordinary primitive merge to the same target
 `DecoderBlock`. Thus the target's state, correction, syndrome registers,
@@ -1114,6 +1136,169 @@ The driver implements two blocks and one ideal synchronous X-sector gate. It
 has no repeated-gate schedule, asynchronous update, visualization, Z sector,
 gate noise, or matched finite-size scan.
 
+### 4.6 Two-sector depolarizing primitive driver
+
+Design and staging: `plans/xz_noise_hub_cnot.md`. Stage 1 (this section) is
+implemented; the Stage-2 hub schedule is not.
+
+#### 4.6.1 Sectors and state
+
+`cnot_primitive_xz.jl` gives every logical block two sectors.
+
+- The X sector stores X errors in the primal edge indexing of Section 2.1.
+  Its syndrome is the vertex parity `get_synds`, and its logical test is
+  `detect_logical_error`.
+- The Z sector stores Z errors on the dual lattice (dual vertex `(i,j)` is the
+  plaquette with lower-left corner `(i,j)`) through the edge bijection
+
+  ~~~text
+  sigma(i,j,1) = (i, j-1, 2)        sigma(i,j,2) = (i-1, j, 1)        (mod L)
+  ~~~
+
+  so the same `get_synds`, `detect_logical_error`, and decoder kernel serve
+  both sectors.
+
+| Type | Contents |
+| --- | --- |
+| `SectorState` | `errors`, `frame` (`L x L x 2 BitArray`), `old_synds`, `new_synds` (`L x L BitArray`) |
+| `DecoderLane` | `hist` (`L x L x Z Bool`), `hist_correction` (`L x L x Z x 3 Bool`), `fields`, `new_fields` (`L x L x Z x 3 x 2 Int`), with the meanings of Section 3.1 |
+| `LogicalBlock` | X sector and Z sector, each a `SectorState` plus a `DecoderLane` |
+| `KernelContext` | Per-worker `L`, `Z`, `r`, wrap tables, and uniform-draw buffers |
+
+#### 4.6.2 Noise model and round order
+
+One ordinary round of a live block:
+
+1. decode each sector: legacy steps 1-6 of Section 3.2.2 (`decode_step!`);
+2. single-qubit depolarizing: one uniform draw per edge `e`; X, Y, Z each
+   with probability `p/3`; `x[e] ^= (X or Y)` and `zdual[sigma(e)] ^= (Z or Y)`;
+3. measure each sector: legacy steps 8-10 (`measure_and_insert!`), with
+   Bernoulli(`q`) flips on every syndrome bit and `q = QRAT * p`.
+
+Per sector, the data flip rate is `2p/3` per round (X and Z flips correlated,
+`P(both) = p/3`) and the measurement flip rate is `q`. At the same `p`, the
+per-sector data rate is 2/3 of the X-only drivers' rate.
+
+A CNOT round (control C, target T) runs steps 1 and 2 on both blocks, then:
+
+1. unless `GATE_MODE=idle`, the ideal transversal CNOT on the physical errors
+   (`x_T ^= x_C`, `zdual_C ^= zdual_T`) and the decoder rule of Section 4.6.3;
+2. the two-qubit depolarizing channel: for each pair (`e` in C, `e` in T),
+   with probability `p2 = P2_RATIO * p` (default `10p`), one of the 15
+   non-identity two-qubit Paulis, drawn uniformly;
+3. step 3 on both blocks.
+
+The round's data noise comes before the gate and is copied by it. Gate-noise
+marginals per sector: C only, T only, and both each occur with probability
+`4 p2 / 15`. `GATE_MODE=idle` skips the gate and the decoder rule, and
+`P2_RATIO` controls the two-qubit channel independently.
+
+#### 4.6.3 Mirrored primitive rule
+
+`merge_primitive!(dst, src)` is the primitive map of Section 4.2.2 without
+the physical error array:
+
+- `frame`, both syndrome registers, and `hist` are XORed into `dst`;
+- `fields` are merged by `nonzeromin`;
+- both `new_fields` are zeroed and both `hist_correction` arrays cleared.
+
+A CNOT `C -> T` applies `merge_primitive!(T.x, C.x)` and
+`merge_primitive!(C.z, T.z)`. The first post-gate event in the absorbing
+decoder is therefore `S_dst(t) xor S_src(t) xor S_dst(t+1)`, and the
+provenance loss of Section 4.2.2 now occurs in both directions.
+
+Buffer invariant: (column parity of `hist`) xor `synd(frame)` = last measured
+syndrome. It is linear, so the merge preserves it, and the cleanup assertion
+(empty buffers imply a syndrome-free decoded state) holds in both sectors.
+
+#### 4.6.4 Schedules and engine
+
+A `Schedule` lists blocks, each with a role (`:hub` or `:partner`), a partner
+index, and a lifetime `[first_round, last_round]`, plus
+`CnotEvent(round, control, target)` entries. `compile_schedule`:
+
+- checks every event (both blocks live; no block in two events in one round);
+- precomputes per-round spawn, live, retire, and event lists;
+- assigns static pool slots.
+
+`run_trial!` executes each round as follows:
+
+1. reset spawned blocks;
+2. decode all live blocks;
+3. apply data noise to all live blocks;
+4. run the CNOT events in order;
+5. measure all live blocks;
+6. clean up and read out every block whose last round it is.
+
+Implemented schedules:
+
+| Builder | Structure |
+| --- | --- |
+| `memory_schedule(T)` | One block, `T` rounds. |
+| `consecutive_schedule(intervals; hub_role=:target)` | Hub and `N` partners live on rounds `1 : sum(intervals) + N`; CNOT `j` happens at round `I1 + ... + Ij + j`. This is the `cnot_primitive_consecutive.jl` structure plus one CNOT round per gate. `hub_role=:control` reverses the gate direction. |
+
+#### 4.6.5 Cleanup, readout, failure, and output
+
+`cleanup_and_readout!` runs up to `CLEANUP_TIME` rounds (default `2 TVAL`)
+with `p = q = 0`. It runs at least one round and stops once both buffers are
+empty. It then takes the winding parities of `errors xor frame` in each
+sector. A block fails if either sector winds; a trial fails if any block
+fails. Cleanup failure is recorded separately and not ORed in.
+
+Counts:
+
+- trials, failures, and cleanup failures;
+- hub failures: any sector, X, Z, per winding bit, and cleanup;
+- partner failures: summed over partners, X, Z, cleanup, and by partner
+  index;
+- trials with any partner failing, and joint hub-and-partner failure trials;
+- `partner_trials = N * trials`.
+
+Stopping is set by `STOP_MODE`: `trials` (`MAX_TRIALS`), `failures`
+(`ACC_ERRORS`), or `capped` (whichever comes first). Quotas are split across
+workers. Worker `w` uses `Xoshiro(hash((SEED, w)))`; `SEED` is drawn and
+recorded when not given, and a given seed with the same worker count
+reproduces the run.
+
+Each result file has a `### data ###` section (`Ft = 1 - fail_rate`,
+`fail_rate`, the counts above) and a `### params ###` section (all parameters,
+the resolved schedule, the seed). Files are named
+`2d_XZ_<schedule>_<rule>_<gate>_p<p>_qrat<r>_P2r<r>_L<L>_Z<Z><schedule tag><stop tag>.txt`.
+
+Environment variables: `SCHEDULE` (`memory` or `consecutive`), `LVAL`,
+`LOGZ`, `ZVAL`, `PVAL`, `QRAT`, `P2_RATIO`, `RVAL`, `GATE_MODE`, `CNOT_RULE`
+(`primitive`), `TVAL` (default `L`), `MEMORY_ROUNDS`, `CNOT_INTERVALS`
+(default `TVAL,TVAL`), `HUB_ROLE`, `CLEANUP_TIME`, `STOP_MODE`, `ACC_ERRORS`,
+`MAX_TRIALS`, `TRIAL_PARALLEL`, `SEED`, `OUTPUT_FILE` or `OUTPUT_DIR`,
+`VERBOSE`. `SYNCH=false` is rejected.
+
+`jobs/cnot_primitive_xz_stage1_local.jl` runs the Stage-1 grid in one Julia
+process, resumably, writing to `results/cnot_primitive_xz/stage1/<variant>/`.
+
+#### 4.6.6 Kernel and overhead
+
+The kernel reproduces the synchronous branch of legacy `update!` bit for bit:
+same arithmetic, tie order, and back-wall draw order. It allocates nothing
+per round:
+
+- explicit cone loops replace `onesite_field_update`;
+- explicit shifts replace the overlapping `copyto!` calls;
+- preallocated uniform buffers replace `rand(L,L,...)`.
+
+Measured single-thread time per sector-round on the development machine:
+
+| L | 5 | 9 | 13 | 19 |
+| --- | ---: | ---: | ---: | ---: |
+| New kernel (ms) | 0.025 | 0.107 | 0.26 | 0.63 |
+| Literal port of the legacy kernel (ms) | 0.10 | 0.42 | 1.06 | 2.62 |
+
+That is about 4x faster at every size.
+
+One block holds two lanes; histories are `Bool` arrays rather than packed
+bits, so the leading cost is `24NZ` machine integers per block. The pool holds
+the largest live set (`N+1` blocks for `consecutive`). Each round costs
+(live blocks) x 2 lanes x `U_block`.
+
 
 
 ## 5. Comparison and Evidence
@@ -1132,6 +1317,7 @@ the active worker count for threaded scans.
 | Two-pass | 2 physical blocks, 1 control history, 3 target streams, 1 retirement history | Separate causal streams joined by label-aware temporal edges | `104NZ` leading integer words plus Boolean state | `Theta(rNZ)` with persistent and fresh route sweeps | Repeated driver not implemented; fixed one-gate allocation |
 | Y-junction | 2 physical blocks; 1 control lane and transient 3-lane target | Two pre-gate branches meet one unlabeled post-gate field on a full local Y graph | Peak `48NZ` integer words, returning to `24NZ` after `Z` rounds | At most `3U_block`, falling to `2U_block` | Repeated driver not implemented; one-gate branches are released at collapse |
 | Block | 2 | One observable XOR-combined history; target fields rebuilt | `2 M_block + O(A)` metadata | `2 U_block`, independent of `A` | Decoder state fixed; stored metadata can follow the same Fibonacci recurrence |
+| Two-sector primitive (`cnot_primitive_xz.jl`) | 2 lanes per block (X and Z) | Primitive merge per sector: target X absorbs control X, control Z absorbs target Z | `2 M_block` per live block | `2 U_block` per live block, about 4x faster kernel | No gate-count growth; live blocks set by the schedule |
 
 The central tradeoff is therefore:
 
@@ -1256,6 +1442,55 @@ moving interface reaches the back wall improves target failures over primitive
 without introducing excess cleanup failures. Sheet-copy remains an
 algorithmic oracle rather than a matched physical model.
 
+#### 5.2.8 Two-sector depolarizing driver (Stage 1)
+
+Data: `results/cnot_primitive_xz/stage1/`. Analysis:
+`notebooks/cnot_primitive_xz_stage1_analysis.ipynb`. Settings:
+
+- local runs, each point capped at 1500 failures or 15000 trials;
+- `L = 5-13`, `q = p`, `P2_RATIO = 10`, `r = 3`, logarithmic `Z`,
+  cleanup `2d`;
+- every gadget variant runs `d` rounds, the CNOT round, then `d` rounds, on
+  two blocks.
+
+Threshold estimates (degree-2 finite-size fits; `chi2/dof` is 2.6-5, so the
+errors are statistical only and finite-size drift dominates):
+
+~~~text
+memory, one block, T = d            p_c = 1.77%
+two memories, 2d+1 rounds           p_c = 1.80%
+ideal CNOT (no two-qubit noise)     p_c = 1.73%
+idle round + two-qubit noise        p_c = 1.05%
+full noisy CNOT gadget              p_c = 0.97%
+~~~
+
+- The two-qubit channel (`p2 = 10p`) is the dominant cost. The primitive
+  merge lowers the crossing by only about 0.07-0.08%.
+- At fixed `p`, however, the merge roughly doubles the failure probability of
+  the two absorbing sectors (hub X and partner Z). The source sectors stay at
+  their idle values, so the any-failure probability rises by about 30-40%.
+  Example, `L = 13`, `p = 0.016`, no gate noise: hub X 0.084 vs 0.042 idle,
+  partner Z 0.090 vs 0.038 idle.
+- Suppression factors, regressing `ln eps` on `(L+1)/2`:
+  - Memory per round (from `T = d, 2d, 4d`): `Lambda = 2.5` at `p = 0.8%`,
+    2.0 at 1.0%, 1.4 at 1.6%. It reaches 1 only near 2.4-2.5%, above the
+    fixed-aspect crossing, because per-round rates fall like `1/L` at the
+    crossing.
+  - Per gadget: `Lambda = 2.15` at 0.3%, 1.5 at 0.5%, 1.0 at 1.0%, consistent
+    with its crossing.
+- Consistency checks:
+  - the two-memory variant matches `1 - (1 - P1)^2` from single-block runs
+    (rms `z = 0.93` over 45 points);
+  - reversing the gate direction swaps the X and Z statistics (`|z| < 1.8`
+    at `10^5` trials per configuration, `L = 5, 9`, `p = 0.008`).
+- Cleanup failures: 3e-4 to 1e-3 of trials per variant, at most 1.4% at the
+  highest `p`. They are concentrated at `L = 9`, as in the legacy X-only
+  driver (2.5e-3 at `L = 9`).
+
+These are coarse local scans. They do not establish a threshold, and they are
+not directly comparable with the X-only results because of the `p`
+normalization.
+
 ## 6. Validation and Operational Caveats
 
 ### 6.1 Validation and diagnostics
@@ -1314,6 +1549,25 @@ estimators:
 ~~~bash
 julia --startup-file=no test/yjunction_runtests.jl
 julia --startup-file=no --check-bounds=yes test/yjunction_runtests.jl
+~~~
+
+The two-sector suite checks:
+
+- bit-exact equivalence of the kernel with legacy `update!`, over 240-round
+  trajectories and from random states;
+- the dual map: bijection, plaquette syndromes, stabilizers, and logical
+  cycles;
+- the single- and two-qubit sampler marginals;
+- the transversal-CNOT algebra, and the mirrored merge against legacy
+  `primitive_cnot_x_sector!`;
+- cleanup after single injected faults: pre-gate data errors on either block
+  in either sector, a pre-gate measurement error, data noise inside the CNOT
+  round, and a post-gate two-qubit fault;
+- zero noise, schedule construction, stopping modes, and reproducibility.
+
+~~~bash
+julia --startup-file=no --threads=2 test/cnot_primitive_xz_runtests.jl
+julia --startup-file=no --threads=2 --check-bounds=yes test/cnot_primitive_xz_runtests.jl
 ~~~
 
 The block regression suite checks:
@@ -1398,4 +1652,14 @@ models and should not be compared as if both were physical-block counts.
   paths in shell commands.
 - Core decoder code is duplicated. Any behavioral fix must be reviewed
   deliberately across the serial baseline, threaded baseline, primitive,
-  sheet-copy, snapshot, two-pass, Y-junction, and block files.
+  sheet-copy, snapshot, two-pass, Y-junction, two-sector, and block files.
+- The two-sector driver's `p` is the total depolarizing probability: its
+  per-sector data rate is `2p/3`. Its thresholds on the `p` axis are not
+  directly comparable with the X-only drivers.
+- The two-sector decoders are independent. They do not use Y correlations or
+  the cross-block correlations of two-qubit faults. Gate noise never touches
+  measurements, and syndrome extraction is not simulated at circuit level.
+- The two-sector driver is synchronous only, and its Stage-2 hub schedule is
+  not implemented yet.
+- `2d_windowed_cnot_block.jl` is absent from the working tree, so
+  `test/runtests.jl` cannot run.
