@@ -12,39 +12,50 @@
 
 set -euo pipefail
 
-# Stage-2 hub scan for cnot_primitive_xz.jl (plans/xz_noise_hub_cnot.md).
+# Hub scan for cnot_primitive_xz.jl (plans/xz_noise_hub_cnot.md, Stage 2).
 #
-# The hub A does CNOT_COUNT noisy CNOT rounds with fresh partners, GAP_ROUNDS
-# ordinary rounds apart (GAP_ROUNDS=d means TVAL, i.e. one gate per d+1
-# rounds). One Slurm array task per (repeat, L, p, N). CNOT_COUNTS entries are
-# counts or multiples of L ("L", "2L"); with an integer GAP_ROUNDS the latter keep
-# the gate density and the aspect ratio fixed. Results go to
-#   ${OUTPUT_DIR}/k_<gap label>/N<CNOT_COUNTS entry>/
+# Design: the hub A (target) does N noisy CNOT rounds with fresh partners,
+# GAP_ROUNDS = k ordinary rounds apart, with the same k at every size, and
+# N = c d CNOTs with d = L. The gate density 1/(k+1) and the circuit's aspect
+# ratio are then fixed. One Slurm array task per (repeat, L, p, N); results go
+# to ${OUTPUT_DIR}/k_<k>/N<c>L/ ("NL" for c = 1).
+#
+# Defaults: k = 1, N = L and 2L, stopping on the hub's (A's) failures.
+# The p grid spans about 0.5-1.5 times the threshold, in 0.05% steps near it.
+# Only k = 1 has a measured threshold (~0.53%); any other k needs P_LIST.
 #
 # Submit from projects/mp-decoder:
 #   bash jobs/cnot_primitive_xz_hub_scan.sh [NREPEATS] [MAX_CONCURRENT]
 # Every setting below can be overridden from the environment, e.g.
-#   P_LIST="0.008 0.009 0.010" CNOT_COUNTS="2 8" bash jobs/cnot_primitive_xz_hub_scan.sh
+#   GAP_ROUNDS=3 P_LIST="0.004 0.005 0.006 0.007 0.008 0.009 0.010" L_LIST="5 7 9" bash jobs/cnot_primitive_xz_hub_scan.sh
 
 NREPEATS=${1:-${NREPEATS:-1}}
 MAX_CONCURRENT=${2:-${MAX_CONCURRENT:-30}}
 
-P_LIST=(${P_LIST:-0.004 0.005 0.006 0.007 0.008 0.009 0.010 0.011 0.012})
+GAP_ROUNDS=${GAP_ROUNDS:-1}
+[[ "${GAP_ROUNDS}" =~ ^[0-9]+$ ]] ||
+    { echo "GAP_ROUNDS must be a nonnegative integer; got '${GAP_ROUNDS}'." >&2; exit 1; }
+case "${GAP_ROUNDS}" in
+    1) P_DEFAULT="0.0025 0.003 0.0035 0.004 0.0045 0.005 0.0055 0.006 0.0065 0.007 0.008" ;;
+    *) P_DEFAULT="" ;;
+esac
+[[ -n "${P_LIST:-${P_DEFAULT}}" ]] ||
+    { echo "No default p grid for GAP_ROUNDS=${GAP_ROUNDS} (threshold not measured yet); set P_LIST." >&2; exit 1; }
+P_LIST=(${P_LIST:-${P_DEFAULT}})
 L_LIST=(${L_LIST:-5 7 9 11 13})
-CNOT_COUNTS_NORMALIZED=${CNOT_COUNTS:-"1 2 4 8"}
+CNOT_COUNTS_NORMALIZED=${CNOT_COUNTS:-"L 2L"}
 CNOT_COUNTS_NORMALIZED=${CNOT_COUNTS_NORMALIZED//,/ }
 N_LIST=()
 read -r -a N_LIST <<< "${CNOT_COUNTS_NORMALIZED}"
-GAP_ROUNDS=${GAP_ROUNDS:-d}
 QRAT=${QRAT:-1}
 P2_RATIO=${P2_RATIO:-10}
 RVAL=${RVAL:-3}
 LOGZ=${LOGZ:-true}
-TVAL_DEFAULT=${TVAL:-L}
 CLEANUP_TIME_DEFAULT=${CLEANUP_TIME:-auto}
 TRACK_FRAMES=${TRACK_FRAMES:-true}
 TRIAL_PARALLEL=${TRIAL_PARALLEL:-true}
 STOP_MODE=${STOP_MODE:-capped}
+STOP_COUNT=${STOP_COUNT:-hub}     # failures ACC_ERRORS counts: hub (target A) or any (failed trials)
 ACC_ERRORS=${ACC_ERRORS:-2000}
 MAX_TRIALS=${MAX_TRIALS:-100000}
 SEED_BASE=${SEED_BASE:-}
@@ -60,16 +71,18 @@ OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_primitive_xz/hub}
 [[ "${OUTPUT_DIR}" == /* ]] || OUTPUT_DIR="${PROJECT_DIR}/${OUTPUT_DIR}"
 
 for n in "${N_LIST[@]}"; do
-    [[ "${n}" =~ ^[1-9][0-9]*$ || "${n}" =~ ^([1-9][0-9]*)?L$ ]] ||
-        { echo "CNOT_COUNTS entries must be positive integers or multiples of L (L, 2L, ...); got '${n}'." >&2; exit 1; }
+    [[ "${n}" =~ ^([1-9][0-9]*)?L$ ]] ||
+        { echo "CNOT_COUNTS entries must be multiples of L (L, 2L, ...); got '${n}'." >&2; exit 1; }
 done
-[[ "${GAP_ROUNDS}" == "d" || "${GAP_ROUNDS}" =~ ^[0-9]+$ ]] ||
-    { echo "GAP_ROUNDS must be 'd' or a nonnegative integer; got '${GAP_ROUNDS}'." >&2; exit 1; }
 [[ "${NREPEATS}" =~ ^[1-9][0-9]*$ ]] || { echo "NREPEATS must be a positive integer." >&2; exit 1; }
 [[ "${MAX_CONCURRENT}" =~ ^[1-9][0-9]*$ ]] || { echo "MAX_CONCURRENT must be a positive integer." >&2; exit 1; }
 case "${STOP_MODE}" in
     trials|failures|capped) ;;
     *) echo "STOP_MODE must be trials, failures, or capped." >&2; exit 1 ;;
+esac
+case "${STOP_COUNT}" in
+    any|hub) ;;
+    *) echo "STOP_COUNT must be any or hub." >&2; exit 1 ;;
 esac
 
 NP=${#P_LIST[@]}
@@ -86,13 +99,12 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     unset P_LIST L_LIST        # arrays cannot be exported; pass the lists as strings
     export P_LIST="${P_STR}" L_LIST="${L_STR}" CNOT_COUNTS="${N_STR}"
     export NREPEATS MAX_CONCURRENT GAP_ROUNDS QRAT P2_RATIO RVAL LOGZ TRACK_FRAMES TRIAL_PARALLEL
-    export STOP_MODE ACC_ERRORS MAX_TRIALS SEED_BASE JULIA_MODULE THREADS_PER_TASK PROJECT_DIR JULIA_SCRIPT OUTPUT_DIR
-    export TVAL="${TVAL_DEFAULT}"
+    export STOP_MODE STOP_COUNT ACC_ERRORS MAX_TRIALS SEED_BASE JULIA_MODULE THREADS_PER_TASK PROJECT_DIR JULIA_SCRIPT OUTPUT_DIR
     export CLEANUP_TIME="${CLEANUP_TIME_DEFAULT}"
     mkdir -p logs "${OUTPUT_DIR}"
     echo "Submitting ${TOTAL_TASKS} hub tasks: L=(${L_STR}) p=(${P_STR}) N=(${N_STR}) k=${GAP_ROUNDS}"
     echo "repeats=${NREPEATS}, threads/task=${THREADS_PER_TASK}, max concurrent=${MAX_CONCURRENT}"
-    echo "stop=${STOP_MODE} (ACC_ERRORS=${ACC_ERRORS}, MAX_TRIALS=${MAX_TRIALS}), P2_RATIO=${P2_RATIO}, QRAT=${QRAT}"
+    echo "stop=${STOP_MODE} on ${STOP_COUNT} failures (ACC_ERRORS=${ACC_ERRORS}, MAX_TRIALS=${MAX_TRIALS}), P2_RATIO=${P2_RATIO}, QRAT=${QRAT}"
     echo "output dir=${OUTPUT_DIR}"
     sbatch --cpus-per-task="${THREADS_PER_TASK}" --export=ALL \
         --array="0-$((TOTAL_TASKS - 1))%${MAX_CONCURRENT}" "$0" "${NREPEATS}" "${MAX_CONCURRENT}"
@@ -115,14 +127,13 @@ REPEAT_INDEX=$((SLURM_ARRAY_TASK_ID / NCOMBOS_PER_REPEAT))
 N_ENTRY=${N_LIST[$N_INDEX]}
 P_VAL=${P_LIST[$P_INDEX]}
 L_VAL=${L_LIST[$L_INDEX]}
-if [[ "${N_ENTRY}" == *L ]]; then N_COEF=${N_ENTRY%L}; N_VAL=$(( ${N_COEF:-1} * L_VAL )); else N_VAL=${N_ENTRY}; fi
-if [[ "${TVAL_DEFAULT}" == "L" ]]; then TVAL_VAL=${L_VAL}; else TVAL_VAL=${TVAL_DEFAULT}; fi
-GAP_LABEL=${GAP_ROUNDS}
-TASK_DIR="${OUTPUT_DIR}/k_${GAP_LABEL}/N${N_ENTRY}"
+N_COEF=${N_ENTRY%L}
+N_VAL=$(( ${N_COEF:-1} * L_VAL ))     # N = c d with d = L
+TASK_DIR="${OUTPUT_DIR}/k_${GAP_ROUNDS}/N${N_ENTRY}"
 mkdir -p "${TASK_DIR}"
 
-export SCHEDULE=hub LVAL="${L_VAL}" PVAL="${P_VAL}" CNOT_COUNT="${N_VAL}" GAP_ROUNDS TVAL="${TVAL_VAL}"
-export QRAT P2_RATIO RVAL LOGZ TRACK_FRAMES TRIAL_PARALLEL STOP_MODE ACC_ERRORS MAX_TRIALS
+export SCHEDULE=hub LVAL="${L_VAL}" PVAL="${P_VAL}" CNOT_COUNT="${N_VAL}" GAP_ROUNDS TVAL="${L_VAL}"
+export QRAT P2_RATIO RVAL LOGZ TRACK_FRAMES TRIAL_PARALLEL STOP_MODE STOP_COUNT ACC_ERRORS MAX_TRIALS
 export CLEANUP_TIME="${CLEANUP_TIME_DEFAULT}" OUTPUT_DIR="${TASK_DIR}"
 if (( NREPEATS > 1 )); then export OUT_ADJ="_rep${REPEAT_INDEX}"; else unset OUT_ADJ; fi
 if [[ -n "${SEED_BASE}" ]]; then export SEED=$((SEED_BASE + SLURM_ARRAY_TASK_ID)); else unset SEED; fi

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -951,14 +951,12 @@ def lambda_ratios(
 
 
 # ---------------------------------------------------------------------------
-# Stage-2 hub circuit (cnot_primitive_xz.jl, SCHEDULE=hub): records and
-# per-gate rates. See plans/xz_noise_hub_cnot.md, Section 8.
-#
-# Logical errors propagate through the CNOTs (partner X -> hub, hub Z ->
-# later partners), so a block's final readout is not its own fault count.
-# The headline per-gate rate therefore comes from the TOTAL failure (any
-# block, any sector), which counts each failed trial once. The own-fault
-# counts written with TRACK_FRAMES=true give the per-block decomposition.
+# Stage-2 hub circuit (cnot_primitive_xz.jl, SCHEDULE=hub): records and rates.
+# See plans/xz_noise_hub_cnot.md, Section 8. Design: a fixed gap k at every
+# size and N = c d CNOTs. The headline is the target A's final readout; every
+# block also gets its own rate (helpers below). Logical errors propagate
+# through the CNOTs (partner X -> A, A's Z -> later partners); the own-fault
+# counts written with TRACK_FRAMES=true remove that inheritance.
 # ---------------------------------------------------------------------------
 
 _HUB_COUNT_KEYS = (
@@ -998,10 +996,9 @@ def parse_result_file(path: str | Path) -> dict:
 
 
 def hub_gap_label(record: dict) -> str:
-    """``"d"`` when the gap equals TVAL, otherwise the integer gap."""
+    """The gap ``k`` of a hub record, as a string key."""
 
-    gap, tval = int(record["GAP_ROUNDS"]), int(record["TVAL"])
-    return "d" if gap == tval else str(gap)
+    return str(int(record["GAP_ROUNDS"]))
 
 
 def load_hub_records(data_dir: str | Path, pattern: str = "2d_XZ_hub_*.txt") -> dict:
@@ -1020,107 +1017,6 @@ def load_hub_records(data_dir: str | Path, pattern: str = "2d_XZ_hub_*.txt") -> 
             if name in _HUB_COUNT_KEYS or name.endswith("_failures") or name.endswith("_by_index"):
                 acc[name] = acc[name] + value
     return groups
-
-
-@dataclass(frozen=True)
-class HubGateRates:
-    """Per-gate rates at one (gap, L, p) point of the hub circuit."""
-
-    gap: str
-    L: int
-    p: float
-    N_values: np.ndarray
-    cnot: DecayFit                       # total failure, any block (headline)
-    hub_x: DecayFit | None               # hub X own faults per gate
-    hub_z: DecayFit | None               # hub Z own faults per gate
-    partner_x: tuple[float, float]       # own faults per partner (rate, error)
-    partner_z: tuple[float, float]
-
-    @property
-    def own_sum(self) -> float:
-        """Sum of the own-fault components; close to ``cnot.eps`` at low rates."""
-
-        parts = [self.partner_x[0], self.partner_z[0]]
-        parts += [fit.eps for fit in (self.hub_x, self.hub_z) if fit is not None]
-        return float(sum(parts))
-
-
-def _pooled_rate(failures: float, trials: float) -> tuple[float, float]:
-    if trials <= 0:
-        return np.nan, np.nan
-    rate = failures / trials
-    return float(rate), float(np.sqrt(max(rate * (1 - rate), 1.0 / trials) / trials))
-
-
-def hub_gate_rates(groups: dict, gap: str, L: int, p: float, *, min_N: int = 1) -> HubGateRates:
-    """Fit the per-gate rates at one point from the runs with ``N >= min_N``."""
-
-    keys = sorted(
-        key for key in groups
-        if key[0] == gap and key[1] == L and np.isclose(key[2], p) and key[3] >= min_N
-    )
-    if len(keys) < 2:
-        raise ValueError(f"need at least two CNOT counts at gap={gap}, L={L}, p={p}")
-    recs = [groups[key] for key in keys]
-    N_values = np.array([key[3] for key in keys], dtype=float)
-    trials = np.array([rec["trials"] for rec in recs])
-    cnot = fit_decay_rate(N_values, [rec["failures"] for rec in recs], trials, p_max=1.0)
-    own = "hub_x_own_failures" in recs[0]
-
-    def sector_fit(name):
-        counts = [rec[name] for rec in recs]
-        try:
-            return fit_decay_rate(N_values, counts, trials, p_max=P_MAX_SECTOR)
-        except ValueError:
-            return None
-
-    hub_x = sector_fit("hub_x_own_failures" if own else "hub_x_failures")
-    hub_z = sector_fit("hub_z_own_failures" if own else "hub_z_failures")
-    partner_trials = sum(rec["partner_trials"] for rec in recs)
-    px = sum(rec["partner_x_own_failures" if own else "partner_x_failures"] for rec in recs)
-    pz = sum(rec["partner_z_own_failures" if own else "partner_z_failures"] for rec in recs)
-    return HubGateRates(
-        gap=gap,
-        L=int(L),
-        p=float(p),
-        N_values=N_values,
-        cnot=cnot,
-        hub_x=hub_x,
-        hub_z=hub_z,
-        partner_x=_pooled_rate(px, partner_trials),
-        partner_z=_pooled_rate(pz, partner_trials),
-    )
-
-
-def hub_rate_grids(
-    groups: dict,
-    gap: str,
-    L_values: Sequence[int],
-    p_values: Sequence[float],
-    *,
-    min_N: int = 1,
-) -> dict[str, RateEstimate]:
-    """Per-gate rates on an ``(L, p)`` grid: total and own-fault components."""
-
-    shape = (len(L_values), len(p_values))
-    names = ("cnot", "hub_x", "hub_z", "partner_x", "partner_z", "own_sum")
-    values = {name: np.full(shape, np.nan) for name in names}
-    errors = {name: np.full(shape, np.nan) for name in names}
-    for i, L in enumerate(L_values):
-        for j, p in enumerate(p_values):
-            try:
-                rates = hub_gate_rates(groups, gap, L, p, min_N=min_N)
-            except ValueError:
-                continue
-            values["cnot"][i, j], errors["cnot"][i, j] = rates.cnot.eps, rates.cnot.eps_error
-            for name in ("hub_x", "hub_z"):
-                fit = getattr(rates, name)
-                if fit is not None:
-                    values[name][i, j], errors[name][i, j] = fit.eps, fit.eps_error
-            values["partner_x"][i, j], errors["partner_x"][i, j] = rates.partner_x
-            values["partner_z"][i, j], errors["partner_z"][i, j] = rates.partner_z
-            values["own_sum"][i, j] = rates.own_sum
-    return {name: RateEstimate(values[name], errors[name]) for name in names}
 
 
 def rates_as_scan(
@@ -1148,3 +1044,188 @@ def rates_as_scan(
         ignored_file_count=0,
         scan_label=label,
     )
+
+
+# ---------------------------------------------------------------------------
+# Target-only and per-block rates from the FINAL readouts of the hub circuit.
+#
+# The hub A is the target. Its final readout includes the partners' X errors
+# that the CNOTs copied onto it, i.e. it is A's actual logical error after the
+# circuit. Each partner has one gate, so its final failure probability is
+# already a per-gate number; it includes A's Z errors copied onto it, so it
+# grows with the partner index. Probabilities use binomial errors.
+# ---------------------------------------------------------------------------
+
+TARGET_KEYS = {"target": "hub_failures", "target_x": "hub_x_failures", "target_z": "hub_z_failures"}
+TARGET_P_MAX = {"target": P_MAX_BLOCK, "target_x": P_MAX_SECTOR, "target_z": P_MAX_SECTOR}
+
+
+@dataclass(frozen=True)
+class BlockRates:
+    """Final-readout failure probability of every block at one ``(gap, L, p, N)`` point."""
+
+    gap: str
+    L: int
+    p: float
+    N: int
+    trials: float
+    target: tuple[float, float]          # A fails in either sector: (rate, error)
+    target_x: tuple[float, float]
+    target_z: tuple[float, float]
+    partners: np.ndarray                 # P(partner j fails), j = 1..N
+    partners_error: np.ndarray
+    partners_x: np.ndarray
+    partners_z: np.ndarray
+    partners_x_own: np.ndarray | None    # own faults (frame snapshots), None without them
+    partners_z_own: np.ndarray | None
+
+
+def _binomial(count: float, trials: float) -> tuple[float, float]:
+    rate = count / trials
+    return float(rate), float(np.sqrt(max(rate * (1 - rate), 1.0 / trials) / trials))
+
+
+def hub_block_rates(groups: dict, gap: str, L: int, p: float, N: int) -> BlockRates:
+    """Per-block final failure probabilities at one point of ``load_hub_records`` output."""
+
+    key = next((k for k in groups if k[0] == gap and k[1] == L and np.isclose(k[2], p) and k[3] == N), None)
+    if key is None:
+        raise KeyError(f"no hub record at gap={gap}, L={L}, p={p}, N={N}")
+    rec = groups[key]
+    trials = float(rec["trials"])
+    partners = np.asarray(rec["partner_failures_by_index"], dtype=float) / trials
+
+    def own(name):
+        return np.asarray(rec[name], dtype=float) / trials if name in rec else None
+
+    return BlockRates(
+        gap=gap,
+        L=int(L),
+        p=float(p),
+        N=int(N),
+        trials=trials,
+        target=_binomial(rec["hub_failures"], trials),
+        target_x=_binomial(rec["hub_x_failures"], trials),
+        target_z=_binomial(rec["hub_z_failures"], trials),
+        partners=partners,
+        partners_error=np.sqrt(np.maximum(partners * (1 - partners), 1.0 / trials) / trials),
+        partners_x=np.asarray(rec["partner_x_failures_by_index"], dtype=float) / trials,
+        partners_z=np.asarray(rec["partner_z_failures_by_index"], dtype=float) / trials,
+        partners_x_own=own("partner_x_own_failures_by_index"),
+        partners_z_own=own("partner_z_own_failures_by_index"),
+    )
+
+
+@dataclass(frozen=True)
+class TargetRates:
+    """Per-gate final error rates of the target A at one ``(gap, L, p)`` point."""
+
+    gap: str
+    L: int
+    p: float
+    N_values: np.ndarray
+    target: DecayFit                     # either sector, p_max = 15/16
+    target_x: DecayFit | None            # p_max = 3/4
+    target_z: DecayFit | None
+
+
+def hub_target_rates(groups: dict, gap: str, L: int, p: float, *, min_N: int = 1) -> TargetRates:
+    """Decay fits ``P_A(N) = P_max [1 - B (1 - eps/P_max)^N]`` over the runs with ``N >= min_N``."""
+
+    keys = sorted(
+        key for key in groups
+        if key[0] == gap and key[1] == L and np.isclose(key[2], p) and key[3] >= min_N
+    )
+    if len(keys) < 2:
+        raise ValueError(f"need at least two CNOT counts at gap={gap}, L={L}, p={p}")
+    recs = [groups[key] for key in keys]
+    N_values = np.array([key[3] for key in keys], dtype=float)
+    trials = np.array([rec["trials"] for rec in recs], dtype=float)
+
+    def fit(name):
+        try:
+            return fit_decay_rate(N_values, [rec[TARGET_KEYS[name]] for rec in recs], trials,
+                                  p_max=TARGET_P_MAX[name])
+        except ValueError:
+            return None
+
+    target = fit("target")
+    if target is None:
+        raise ValueError(f"no usable target decay fit at gap={gap}, L={L}, p={p}")
+    return TargetRates(gap=gap, L=int(L), p=float(p), N_values=N_values,
+                       target=target, target_x=fit("target_x"), target_z=fit("target_z"))
+
+
+def target_decay_grids(
+    groups: dict,
+    gap: str,
+    L_values: Sequence[int],
+    p_values: Sequence[float],
+    *,
+    min_N: int = 1,
+) -> dict[str, RateEstimate]:
+    """Per-gate target rates from decay fits over ``N`` on an ``(L, p)`` grid; ``"B"`` is the intercept."""
+
+    shape = (len(L_values), len(p_values))
+    names = ("target", "target_x", "target_z", "B")
+    values = {name: np.full(shape, np.nan) for name in names}
+    errors = {name: np.full(shape, np.nan) for name in names}
+    for i, L in enumerate(L_values):
+        for j, p in enumerate(p_values):
+            try:
+                rates = hub_target_rates(groups, gap, L, p, min_N=min_N)
+            except ValueError:
+                continue
+            for name in ("target", "target_x", "target_z"):
+                fit = getattr(rates, name)
+                if fit is not None:
+                    values[name][i, j], errors[name][i, j] = fit.eps, fit.eps_error
+            values["B"][i, j] = rates.target.intercept
+    return {name: RateEstimate(values[name], errors[name]) for name in names}
+
+
+def target_point_grids(
+    groups: dict,
+    gap: str,
+    L_values: Sequence[int],
+    p_values: Sequence[float],
+    N_of_L: Callable[[int], int],
+) -> dict[str, RateEstimate]:
+    """Target and partner rates at one CNOT count ``N = N_of_L(L)`` per size.
+
+    Keys:
+
+    - ``"P_target"``, ``"P_target_x"``, ``"P_target_z"``: A's final failure
+      probability over the whole circuit (the fixed-aspect observable when
+      ``N`` grows with ``L``);
+    - ``"eps_target"``, ``"eps_target_x"``, ``"eps_target_z"``: the single-point
+      per-gate rate with ``B = 1``;
+    - ``"partner_mean"``, ``"partner_first"``, ``"partner_last"``: final failure
+      probability of a partner (one gate each), averaged over partners, and for
+      the first and the last partner. The mean's error treats partners as
+      independent, so it is a lower bound.
+    """
+
+    shape = (len(L_values), len(p_values))
+    names = ("P_target", "P_target_x", "P_target_z", "eps_target", "eps_target_x", "eps_target_z",
+             "partner_mean", "partner_first", "partner_last")
+    values = {name: np.full(shape, np.nan) for name in names}
+    errors = {name: np.full(shape, np.nan) for name in names}
+    for i, L in enumerate(L_values):
+        N = int(N_of_L(L))
+        for j, p in enumerate(p_values):
+            try:
+                block = hub_block_rates(groups, gap, L, p, N)
+            except KeyError:
+                continue
+            for name in ("target", "target_x", "target_z"):
+                rate, error = getattr(block, name)
+                values[f"P_{name}"][i, j], errors[f"P_{name}"][i, j] = rate, error
+                if 0 < rate < TARGET_P_MAX[name]:
+                    values[f"eps_{name}"][i, j], errors[f"eps_{name}"][i, j] = single_point_rate(
+                        rate * block.trials, block.trials, N, p_max=TARGET_P_MAX[name])
+            values["partner_mean"][i, j] = block.partners.mean()
+            errors["partner_mean"][i, j] = np.sqrt(np.sum(block.partners_error ** 2)) / N
+            values["partner_first"][i, j], errors["partner_first"][i, j] = block.partners[0], block.partners_error[0]
+            values["partner_last"][i, j], errors["partner_last"][i, j] = block.partners[-1], block.partners_error[-1]
+    return {name: RateEstimate(values[name], errors[name]) for name in names}

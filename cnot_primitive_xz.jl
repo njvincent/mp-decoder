@@ -732,8 +732,9 @@ CNOT rounds, one with each fresh partner P_j, separated by k ordinary rounds:
 Every partner gets d ordinary rounds, its CNOT round, and d ordinary rounds
 (2d+1 in total) and is read out right after; A gets d ordinary rounds before
 its first CNOT, k between CNOTs, and d after the last. The hub is the target
-(default) or the control. `N = 1` is the same schedule as
-`consecutive_schedule([d, d])`.
+(default) or the control. Scans use the same k at every size and N = c d, so
+the gate density 1/(k+1) and the circuit's aspect ratio are fixed. `N = 1` is
+the same schedule as `consecutive_schedule([d, d])`.
 """
 function hub_schedule(d::Int, N::Int, k::Int; hub_role::Symbol=:target)
     d >= 1 || error("hub schedule needs d >= 1")
@@ -1052,6 +1053,7 @@ Base.@kwdef struct XZConfig
     schedule::Schedule
     cleanup_time::Int
     stop_mode::String = "trials"      # "trials", "failures", or "capped"
+    stop_count::Symbol = :any         # failures counted for stopping: :any (failed trials) or :hub
     acc_errors::Int = 1000
     max_trials::Int = 100_000
     trial_parallel::Bool = true
@@ -1074,6 +1076,7 @@ function validate(cfg::XZConfig)
     cfg.rule === :primitive || error("only CNOT_RULE=primitive is implemented")
     cfg.cleanup_time >= 0 || error("cleanup time must be nonnegative")
     cfg.stop_mode in ("trials", "failures", "capped") || error("STOP_MODE must be trials, failures, or capped")
+    cfg.stop_count in (:any, :hub) || error("STOP_COUNT must be any or hub")
     cfg.stop_mode != "trials" && cfg.acc_errors <= 0 && error("ACC_ERRORS must be positive")
     cfg.stop_mode != "failures" && cfg.max_trials <= 0 && error("MAX_TRIALS must be positive")
     cfg.stop_mode != "trials" && cfg.p == 0 && cfg.qrat * cfg.p == 0 &&
@@ -1108,13 +1111,14 @@ function simulate(cfg::XZConfig)
             FrameTracker(cfg.L, cfg.Z, length(cs.schedule.blocks), Xoshiro(hash((cfg.seed, w, :frames)))) :
             nothing
         c = Counters(cs.partner_count)
+        counted(c) = cfg.stop_count === :hub ? c.hub_failures : c.failures
         while true
             if cfg.stop_mode == "trials"
                 c.trials >= trial_quota[w] && break
             elseif cfg.stop_mode == "failures"
-                c.failures >= fail_quota[w] && break
+                counted(c) >= fail_quota[w] && break
             else
-                (c.failures >= fail_quota[w] || c.trials >= trial_quota[w]) && break
+                (counted(c) >= fail_quota[w] || c.trials >= trial_quota[w]) && break
             end
             run_trial!(cs, pool, params, ctx, rng, c, frames)
             if cfg.verbose && c.trials % 10_000 == 0
@@ -1199,6 +1203,7 @@ function params_record(cfg::XZConfig)
         "total_rounds" => s.last_round,
         "CLEANUP_TIME" => cfg.cleanup_time,
         "stop_mode" => cfg.stop_mode,
+        "STOP_COUNT" => String(cfg.stop_count),
         "seed" => Int128(cfg.seed),
         "julia_threads" => nthreads(),
         "trial_parallel" => cfg.trial_parallel,
@@ -1244,9 +1249,10 @@ function result_filename(cfg::XZConfig)
     else
         ""
     end
+    fail_tag = cfg.stop_count === :hub ? "_hubfail" : "_fail"
     stop_adj = cfg.stop_mode == "trials" ? "_trials$(cfg.max_trials)" :
-               cfg.stop_mode == "failures" ? "_fail$(cfg.acc_errors)" :
-               "_fail$(cfg.acc_errors)cap$(cfg.max_trials)"
+               cfg.stop_mode == "failures" ? "$(fail_tag)$(cfg.acc_errors)" :
+               "$(fail_tag)$(cfg.acc_errors)cap$(cfg.max_trials)"
     return "2d_XZ_$(s.name)_$(cfg.rule)_$(cfg.gate_mode)_p$(round(cfg.p, sigdigits=4))" *
            "_qrat$(cfg.qrat)_P2r$(cfg.p2_ratio)_L$(cfg.L)_Z$(cfg.Z)$(sched_adj)$(stop_adj).txt"
 end
@@ -1276,10 +1282,10 @@ function config_from_env(env=ENV)
         hub_role = Symbol(lowercase(strip(get(env, "HUB_ROLE", "target"))))
         consecutive_schedule(intervals; hub_role=hub_role)
     elseif name == "hub"
-        gap_env = lowercase(strip(get(env, "GAP_ROUNDS", "d")))
-        gap = gap_env == "d" ? T : parse(Int, gap_env)
+        # fixed gap k (the same at every size); N CNOTs, default N = d = TVAL
+        gap = parse(Int, get(env, "GAP_ROUNDS", "1"))
         hub_role = Symbol(lowercase(strip(get(env, "HUB_ROLE", "target"))))
-        hub_schedule(T, parse(Int, get(env, "CNOT_COUNT", "4")), gap; hub_role=hub_role)
+        hub_schedule(T, parse(Int, get(env, "CNOT_COUNT", string(T))), gap; hub_role=hub_role)
     else
         error("SCHEDULE must be memory, consecutive, or hub")
     end
@@ -1299,6 +1305,7 @@ function config_from_env(env=ENV)
         schedule=schedule,
         cleanup_time=cleanup_time,
         stop_mode=lowercase(strip(get(env, "STOP_MODE", "trials"))),
+        stop_count=Symbol(lowercase(strip(get(env, "STOP_COUNT", "any")))),
         acc_errors=parse(Int, get(env, "ACC_ERRORS", "1000")),
         max_trials=parse(Int, get(env, "MAX_TRIALS", "100000")),
         trial_parallel=parse(Bool, get(env, "TRIAL_PARALLEL", "true")),
@@ -1313,7 +1320,7 @@ function main()
     println("cnot_primitive_xz.jl: schedule=$(cfg.schedule.name), L=$(cfg.L), Z=$(cfg.Z), ",
             "p=$(cfg.p), q=$(q_of(cfg)), p2=$(p2_of(cfg)), gate=$(cfg.gate_mode), ",
             "rounds=$(cfg.schedule.last_round), cleanup=$(cfg.cleanup_time), ",
-            "stop=$(cfg.stop_mode), threads=$(nthreads())")
+            "stop=$(cfg.stop_mode) on $(cfg.stop_count) failures, threads=$(nthreads())")
     data = simulate(cfg)
     params = params_record(cfg)
     out = get(ENV, "OUTPUT_FILE", "")

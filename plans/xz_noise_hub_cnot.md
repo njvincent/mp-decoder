@@ -2,21 +2,17 @@
 
 Status (2026-11-10): Stage 1 is implemented and scanned
 (`results/cnot_primitive_xz/stage1/`). Stage 2's hub schedule, frame
-snapshots, local runner, and Slurm script are implemented. Two local Stage-2
-scans are analyzed:
-
-- the first pass at `k = d` (`results/cnot_primitive_xz/hub/k_d/`), in
-  `notebooks/cnot_primitive_xz_hub_analysis.ipynb`;
-- the fixed-density scan at `k = 1` with `N = L, 2L`
-  (`results/cnot_primitive_xz/hub/k_1/`), in
-  `notebooks/cnot_primitive_xz_hub_fixed_gap_analysis.ipynb`.
-
-The implementation is documented in `docs/implementation.md` Section 4.6, and
-the results in Sections 5.2.8-5.2.10.
+snapshots, local runner, and Slurm script are implemented for one design: a
+fixed gap `k` at every size and `N = c d` CNOTs. Its first local scan (`k = 1`,
+`N = L, 2L`, `results/cnot_primitive_xz/hub/k_1/`) is analyzed in
+`notebooks/cnot_primitive_xz_hub_fixed_gap_analysis.ipynb`. The implementation
+is documented in `docs/implementation.md` Section 4.6, and the results in
+Sections 5.2.8-5.2.9.
 
 Stage 1 adds both error sectors, depolarizing data noise, and noisy CNOT
-rounds. Stage 2 adds the hub circuit and the per-gate error rate, threshold,
-and suppression factor. A Y-junction gate rule is a later stage (Section 12).
+rounds. Stage 2 adds the hub circuit and the target's per-gate error rate,
+threshold, and suppression factor, plus a rate for every block. A Y-junction
+gate rule is a later stage (Section 12).
 
 ## 1. Decisions fixed with the user
 
@@ -29,8 +25,8 @@ and suppression factor. A Y-junction gate rule is a later stage (Section 12).
 | Decoder rule at a gate | Primitive merge, mirrored for the Z sector (Section 4). Y-junction comes in the next stage. |
 | Hub direction | A is always the target. |
 | Partner lifetime | Each partner gets `d` noisy rounds, its CNOT round, then `d` noisy rounds, cleanup, and readout. Its failures count. |
-| Metric | Both, as in Section 8: Google-style per-gate rate and `Lambda`, plus Lake-style fixed-aspect-ratio threshold. |
-| Gate density | Fixed: the gap `k` (ordinary hub rounds between CNOTs) is the same for every `L`, and the number of CNOTs scales with the code size, `N = cL`. The density `1/(k+1)` and the aspect ratio are then the same at every `L`. The first pass used `k = d`, whose density `1/(d+1)` falls with `L`; it stays as a reference. Other densities (other `k`) come later. |
+| Metric | The final error rate is characterized by the target A alone: A's final readout, either sector. Lake-style fixed-aspect threshold, plus Google-style per-gate rate and `Lambda`. Every block also gets its own rate (Section 8). |
+| Gate density | Fixed: the gap `k` (ordinary hub rounds between CNOTs) is the same for every `L`, and the number of CNOTs scales with the distance, `N = c d` with `d = L` (`c = 1, 2`). The density `1/(k+1)` and the aspect ratio are then the same at every `L`. The first scan uses `k = 1`; other `k` come later. |
 | Sizes | `L in {5, 7, 9, 11, 13}`; `L = 19` only if the budget allows later. |
 | Local runs | Run on this machine, about 10^4 trials per point. Stage 1 used 12 threads; later local runs use at most 8 so the machine stays usable. Slurm scripts are written for Stage 2. |
 | Kernel | The new driver gets a non-allocating kernel, checked bit-for-bit against legacy `update!` after the correctness tests pass. |
@@ -225,8 +221,10 @@ Rounds are numbered `tau = 1, 2, ...`. A block lives on
 
    Every partner gets `d` ordinary rounds, its CNOT round, and `d` ordinary
    rounds (`2d+1` in total). A gets `k` ordinary rounds between CNOT rounds and
-   `d` after the last one. `N=1` is the single-gadget experiment of
-   2408.01393 and is identical to `consecutive` with intervals `[d,d]`.
+   `d` after the last one. Scans fix `k` across sizes and set `N = c d`.
+   `N=1` is the single-gadget experiment of 2408.01393 and is identical to
+   `consecutive` with intervals `[d,d]`; this is a test of the schedule
+   engine.
 
 Early partner readout is exact. After its gate, a partner never interacts with
 A again: physically there are no further gates, and under the primitive rule
@@ -237,19 +235,19 @@ the two decoders are independent from then on.
 The failure convention is unchanged. Cleanup runs with `p = q = 0` on both
 sectors until both buffers are empty or `CLEANUP_TIME` (default `2d`) rounds
 have passed; then the winding tests run. A block fails if X winding or Z
-winding is nontrivial. A trial fails if any block fails. Cleanup failure is
-recorded separately and not ORed in (implementation doc, Sections 3.3, 4.1).
+winding is nontrivial. The driver also counts failed trials (any block); the
+headline uses A alone (Section 8). Cleanup failure is recorded separately and
+not ORed in (implementation doc, Sections 3.3, 4.1).
 
 Recorded per run:
 
-- trials and failures;
+- trials and failed trials;
 - hub X and Z failures, per winding bit;
-- partner X and Z failure totals;
-- partner failures by index `j`;
-- trials with any partner failure;
-- hub and partner cleanup failures;
-- the resolved `tau_j` list and lifetimes, plus all parameters, under
-  `### params ###`.
+- partner X and Z failure totals, and partner failures by index `j`;
+- with frame snapshots, own faults per block and sector (partners by index);
+- hub, partner, and snapshot cleanup failures;
+- the resolved `tau_j` list and lifetimes, the stopping rule (`STOP_COUNT`),
+  plus all parameters, under `### params ###`.
 
 The file format stays `### data ###` / `### params ###`.
 
@@ -267,55 +265,49 @@ The four references use different conventions:
 They differ in the unit (gadget, round, cycle, `d` rounds) and in whether the
 fixed prep/readout cost is removed, so they are not interchangeable.
 
-Propagation (found in the first hub runs, 2026-11-09). Logical errors move
-through the CNOTs. With A as target, a partner's pre-gate X logical error
-reaches A, and A's Z logical errors reach every later partner. A block's final
-readout therefore contains other blocks' faults. At `L=13`, `p=0.008`, `N=8`,
-the partners' Z failures grow with partner index from 128 to 545 per 2000
-trials. Pooling per-partner final failures (the first draft's `eps_P`)
-double-counts A's Z faults, so the metric is defined as follows.
+Propagation. Logical errors move through the CNOTs. With A as target, a
+partner's pre-gate X logical error reaches A, and A's Z logical errors reach
+every later partner. A block's final readout therefore contains other blocks'
+faults: at `L = 13`, `p = 0.5%`, `k = 1`, `N = 13`, the partners' final Z
+failures grow with the index from 29 to 339 per 5332 trials. Frame snapshots
+at each CNOT (`docs/implementation.md` Section 4.6.5) give each block's own
+faults, which remove that inheritance.
 
-1. Per-gate rate, Google style (headline). Fit the total failure probability
-   (any block, either sector) against `N` with
-   `1 - P(N) = B (1 - eps_CNOT)^N`. Each failed trial counts once, whichever
-   block shows it. `B` absorbs A's first and last `d` rounds. With only
+Metrics, all from A's final readout unless stated:
+
+1. Threshold. With a fixed `k` and `N = c d`, the circuit has a fixed gate
+   density and aspect ratio, so A's final failure probability
+   `P_A(N = c d)` (either sector, `hub_failures`) is the Lake-style
+   observable. Its finite-size crossing at each `c` is the threshold. `P_A`
+   includes the partners' X errors copied onto A, i.e. it is A's logical
+   error after the circuit. The per-sector crossings (X absorbs the partners'
+   X history; Z is the source of the partners' inherited Z) show which sector
+   limits A.
+2. Per-gate rate, Google style. Fit
+   `P_A(N) = P_max [1 - B (1 - eps_A / P_max)^N]` with `P_max = 15/16` (per
+   sector `3/4`). `B` absorbs A's first and last `d` rounds. With only
    `N = L, 2L` the fit is exact, and it loses precision where `N = 2L`
-   saturates. Once it confirms `B ≈ 1`, the headline is the single-point rate
-   `1 - (1 - P(L))^(1/L)`.
-2. Own-fault decomposition (diagnostic). Frame snapshots at each CNOT
-   (`docs/implementation.md` Section 4.6.5) give each block's own faults.
-   - Per gate: `eps_hub_x` and `eps_hub_z` from decay fits of the hub's own
-     sector failures against `N` (`P_max = 3/4`).
-   - Per partner: `eps_partner_x` and `eps_partner_z`, pooled.
-   - Their sum should match `eps_CNOT` at low rates.
-3. Suppression factor: `Lambda_CNOT` from regressing `ln eps_CNOT` on
-   `(L+1)/2` (Google's method), with the pairwise ratios
-   `eps_L / eps_(L+2)`.
-4. Threshold. At a fixed gap `k` with `N = cL` CNOTs (`c = 1, 2`), the
-   circuit has a fixed gate density and a fixed aspect ratio, so the total
-   failure probability `P_total(N = cL)` is the Lake-style observable. Its
-   finite-size crossing at each `c` is the threshold.
-   - The crossing of `eps_CNOT` and the point where `Lambda_CNOT = 1` are the
-     Google-style cross-checks.
-   - At finite `L` both lie above the threshold. Since `P_total ≈ cL eps_CNOT`,
-     `P_total` is flat where `Lambda_CNOT ≈ (L+2)/L`.
-   - The components' crossings show which part limits the circuit. They use
-     own faults per circuit: the hub over its whole history, and the partners
-     summed.
+   saturates. Once it confirms `B ≈ 1`, the headline per-gate rate is the
+   single-point value at `N = L`.
+3. Suppression factor: `Lambda_A` from regressing `ln eps_A` on `(L+1)/2`,
+   with the pairwise ratios `eps_L / eps_(L+2)`. The crossing of `eps_A` and
+   `Lambda_A = 1` lie above the threshold at finite `L`: since
+   `P_A ≈ cL eps_A`, `P_A` is flat where `Lambda_A ≈ (L+2)/L`.
+4. Each block. A partner has one gate, so its final failure probability `P_j`
+   is a per-gate number; it grows with `j` because it carries A's Z errors
+   from before gate `j`. Its own X and Z faults are the per-gate rate charged
+   to that partner. A's final failures equal its own faults (final/own 1.003
+   in X at `k = 1`).
 
-   In the `k = d` reference each
-   gate adds a fixed spacetime volume (`d+1` hub rounds plus one
-   `(2d+1)`-round partner), so there `eps_CNOT` itself is the fixed-aspect
-   observable.
+Statistics: `STOP_COUNT=hub` makes `ACC_ERRORS` count A's failures (A has
+about 0.7 of the failed trials).
 
-Memory reference. The depolarizing model has no baseline yet, so this is
-needed anyway. Running `memory` at `T in {d, 2d, 4d}` gives the per-round rate
-`eps_mem` (slope) and Lake's `p_log(T=d)`. Then `eps_A^(d)` is compared with
-the memory error per `d` rounds, and `eps_P` with a `(2d+1)`-round memory.
+Memory reference: `memory` at `T in {d, 2d, 4d}` gives the per-round rate and
+Lake's `p_log(T=d)` (Stage 1, threshold 1.77%).
 
-Fit range. The working hypothesis was that A's buffer reaches steady state
-after about `ceil(Z/(k+1))` gates. Observed so far: `B ≈ 1` from `N = 1` at
-`k = d`, and over `N = L, 2L` at `k = 1` (Section 12).
+Steady state: the working hypothesis was that A's buffer reaches steady state
+after about `ceil(Z/(k+1))` gates. At `k = 1`, `B` is 1 within errors over
+`N = L, 2L`, and the partners' own Z faults level off after 4-5 gates.
 
 ## 9. Validation (`test/cnot_primitive_xz_runtests.jl`)
 
@@ -358,25 +350,19 @@ after about `ceil(Z/(k+1))` gates. Observed so far: `B ≈ 1` from `N = 1` at
 
 ## 10. Cost
 
-Measured with the current kernel (this Mac, one thread): 0.11, 0.50, 1.17,
-and 2.89 ms per sector-round at `L` = 5, 9, 13, 19, allocating 0.04-1.24 MB
-per round. A hub trial costs about
+A hub trial costs about
 
 ~~~text
 R = [2d + 1 + (N-1)(k+1)]  +  N (2d+1)  +  ~10 (N+1)     block-rounds, x 2 sectors
      hub A                    partners      cleanup
 ~~~
 
-- At `L=13, k=1`: summed over `N in {1,2,4,8}`, `R` is about 725, which is
-  about 1.7 s per trial set per thread, so 10^5 trials take about 3 h on 16
-  threads per `(p,k)` point.
-- The main Stage-2 scan (Section 11) adds up to roughly 10^2 16-core
-  node-hours, and more on slower cluster cores.
-- Partners dominate the cost, at about `2d+1` rounds per gate.
-
-Optional performance pass: a non-allocating kernel that stays bit-exact
-against test 1. It would give a several-fold speedup and is only worth doing
-if the scan budget requires it.
+Partners dominate, at about `2d+1` rounds per gate, so with `N = c d` a trial
+costs `O(c d^2)` block-rounds of `O(d^2)` work each. Measured in the `k = 1`
+local scan at `L = 13` (frame tracking on): 0.23 s per trial and thread at
+`N = L`, 0.46 s at `N = 2L`. 10^5 trials of both take about 1.2 h per `p` on
+16 threads. At `L = 19`, scaling by the kernel time (2.4x) and `d^2` (2.1x)
+gives about 6 h per `p` on 16 threads, less where capped stopping ends early.
 
 ## 11. Implementation steps
 
@@ -399,25 +385,24 @@ Stage 1:
 
 Stage 2:
 
-6. Hub schedule and the hub/partner counters; test 7.
-7. `jobs/cnot_primitive_xz_hub_scan.sh`: Slurm array over `(p, L, N, k)`,
-   writing to `results/cnot_primitive_xz/hub/k_<k>/N<N>/` (`N` may be `L` or
-   `2L`), with the existing `STOP_MODE` interface.
-8. `notebooks/analysis_utils.py`: loader, per-gate fits, `Lambda` regression,
-   reuse of the finite-size fit. Add an analysis notebook.
+6. Hub schedule and the hub/partner counters, frame snapshots, and
+   `STOP_COUNT`; tests 7-9.
+7. `jobs/cnot_primitive_xz_hub_scan.sh` (Slurm) and
+   `jobs/cnot_primitive_xz_hub_local.jl`: arrays over `(p, L, c)` at one `k`,
+   writing to `results/cnot_primitive_xz/hub/k_<k>/N<c>L/`.
+8. `notebooks/analysis_utils.py`: loader, target and per-block rates, decay
+   fit, `Lambda` regression, reuse of the finite-size fit; the analysis
+   notebook `notebooks/cnot_primitive_xz_hub_fixed_gap_analysis.ipynb`.
 9. Scans:
-   - first pass (done, local): `L in {5,7,9,11,13}`, `N in {1,2,4,8}`,
-     `k = d`, `p = 0.4-1.4%`;
-   - fixed density (done, local): `k = 1`, `N = L, 2L`, `L = 5-13`,
-     `p = 0.3-0.9%`;
-   - next, on the cluster: `k = 1` with more statistics and `L = 15-19`.
-     These test whether the fixed-aspect crossing (0.55%) moves toward the
-     absorbing sectors' crossings (about 0.5%);
-   - then: other densities (`k = 0, 2, 4`), and the idle control
+   - done (local): `k = 1`, `N = L, 2L`, `L = 5-13`, `p = 0.3-0.9%`;
+   - next, on the cluster: `k = 1` with `STOP_COUNT=hub`, more statistics,
+     and `L = 15-19`, to test whether A's crossing (0.53%) moves toward its
+     X sector's (0.52%);
+   - then other gaps (`k = 0, 2, 3, 4`), each with a coarse pilot to locate
+     its threshold before the `p` grid is set, and the idle control
      (`GATE_MODE=idle`) at `k = 1`, which separates the gate-noise budget from
      the merges.
-10. Documentation: results summary in `docs/implementation.md` (done:
-    Sections 5.2.9 and 5.2.10).
+10. Documentation: results in `docs/implementation.md` Section 5.2.9.
 
 ## 12. Limitations and open questions
 
@@ -433,33 +418,21 @@ Stage 2:
   0.07%. The merge also doubles the failure probability of the absorbing
   sectors at fixed `p`. Smaller `k` stacks gate noise on A and is expected to
   push the crossing lower.
-- Stage-2 first pass (`docs/implementation.md` Section 5.2.9), `k = d`:
-  - `ln(1 - P_total)` is linear in `N` with intercept `B` near 1, and
-    `eps_CNOT` equals the single-gadget failure probability.
-  - Per-gate threshold: 0.958(11)% (0.951-0.970% over fit choices);
-    `Lambda_CNOT = 1` near 0.96%.
-  - `Lambda_CNOT` = 1.82 at `p = 0.4%`, 1.51 at 0.5%, 1.31 at 0.6%.
-  - The absorbing sectors (hub X, partner Z) set the threshold at
-    0.95-0.96%; the source sectors (hub Z, partner X) cross at 1.08-1.09%.
-- Stage-2 fixed density (`docs/implementation.md` Section 5.2.10), `k = 1`,
+- Stage-2 result (`docs/implementation.md` Section 5.2.9), `k = 1`,
   `N = L, 2L`:
-  - Fixed-aspect threshold: 0.547(5)% at `N = L` and 0.543(4)% at `N = 2L`
-    (0.533-0.555% over fit choices). That is 0.57 of the `k = d` threshold.
-  - The absorbing sectors cross lower: hub X at 0.51-0.52%, while partner Z
-    is flat in `L` at 0.45%. The asymptotic threshold may therefore be nearer
-    0.5%.
-  - `Lambda_CNOT` = 1.62 at 0.4%, 1.34 at 0.5%, 1.18 at 0.6%.
-  - The `eps_CNOT` crossing and `Lambda_CNOT = 1` are near 0.79%, above the
-    threshold, because of the per-gate normalization (Section 8 item 4).
-  - At `L = 13` the per-gate rate is 1.65-1.7 times the `k = d` rate.
+  - A's fixed-aspect threshold is 0.533(5)% at `N = L` and 0.532(5)% at
+    `N = 2L` (0.53-0.54% over fit choices), 0.30 of the memory threshold.
+  - A's X sector crosses lowest (0.51-0.52%), so the asymptotic threshold may
+    be nearer 0.52%.
+  - `Lambda_A` = 1.59, 1.34, 1.19 at `p` = 0.4, 0.5, 0.6%; `Lambda_A = 1`
+    near 0.83%, above the threshold because of the per-gate normalization
+    (Section 8 item 3).
 - `Lambda` comes from `L = 5-13` only. Lake's gerrymandering theorem implies
   suppression slower than `(L+1)/2` asymptotically for this decoder.
 - Next stage (Y-junction): with `k < Z`, a new gate reaches A before the
   previous junction collapses (`Z` rounds), so the hub needs overlapping
   junctions on one target. That is a design problem for that stage's plan.
-- At `k = d` the decay is already in steady state from `N = 1`.
-- At `k = 1`, `B` is 1 within errors over `N = L, 2L`, but A is not
-  stationary: partner own-Z counts rise by 1.0-1.6% per gate along the
-  circuit. A longer circuit (`N = 4L`) would show whether this ever reaches
-  the total rate.
-- Still open: `L >= 15` and the other densities.
+- At `k = 1` A is stationary after a warm-up of 4-5 gates (Section 8,
+  steady state). A longer circuit (`N = 4L`) is not needed for stationarity.
+- Still open: `L >= 15`, the other gaps `k`, and the two-qubit noise ratio
+  (`P2_RATIO = 10` makes gate noise 80% of A's data noise at `k = 1`).
