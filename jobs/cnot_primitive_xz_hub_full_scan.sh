@@ -2,7 +2,7 @@
 #SBATCH --job-name=cnot_primitive_xz_hub_full_scan
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
-#SBATCH --time=36:00:00
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -24,6 +24,12 @@ set -euo pipefail
 # Each default p grid spans about 0.5-1.5 times the threshold, in steps of
 # about 5-7% of it near p_c. Measured thresholds: k = 0 ~0.35% and k = 3
 # ~0.55-0.6% (local initial scans, L = 5-9), k = 1 ~0.53%. Any other k needs P_LIST.
+#
+# Time limit per task: the slowest point (N = 2L, 10^5 trials) measured about
+# 88 ms per trial at L = 13 and 450 ms at L = 19 on 8 threads of the development
+# machine. On 16 threads with cluster cores up to 2x slower that is about 2.5 h
+# and 12.5 h. The limit is 6 h when every L <= 13 and 24 h otherwise;
+# SBATCH_TIMELIMIT=hh:mm:ss overrides it.
 #
 # Submit from projects/mp-decoder:
 #   bash jobs/cnot_primitive_xz_hub_full_scan.sh [NREPEATS] [MAX_CONCURRENT]
@@ -100,6 +106,10 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     P_STR="${P_LIST[*]}"
     L_STR="${L_LIST[*]}"
     N_STR="${N_LIST[*]}"
+    MAX_L=$(printf '%s\n' "${L_LIST[@]}" | sort -n | tail -1)
+    if [[ -n "${SBATCH_TIMELIMIT:-}" ]]; then TIME_OPT=""; TIME_STR="${SBATCH_TIMELIMIT}"
+    elif (( MAX_L <= 13 )); then TIME_OPT="--time=06:00:00"; TIME_STR="06:00:00"
+    else TIME_OPT="--time=24:00:00"; TIME_STR="24:00:00"; fi
     unset P_LIST L_LIST        # arrays cannot be exported; pass the lists as strings
     export P_LIST="${P_STR}" L_LIST="${L_STR}" CNOT_COUNTS="${N_STR}"
     export NREPEATS MAX_CONCURRENT GAP_ROUNDS QRAT P2_RATIO RVAL LOGZ TRACK_FRAMES TRIAL_PARALLEL
@@ -107,12 +117,12 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     export CLEANUP_TIME="${CLEANUP_TIME_DEFAULT}"
     mkdir -p logs "${OUTPUT_DIR}"
     echo "Submitting ${TOTAL_TASKS} hub tasks: L=(${L_STR}) p=(${P_STR}) N=(${N_STR}) k=${GAP_ROUNDS}"
-    echo "repeats=${NREPEATS}, threads/task=${THREADS_PER_TASK}, max concurrent=${MAX_CONCURRENT}"
+    echo "repeats=${NREPEATS}, threads/task=${THREADS_PER_TASK}, max concurrent=${MAX_CONCURRENT}, time limit/task=${TIME_STR}"
     if [[ "${STOP_MODE}" == "trials" ]]; then STOP_STR="${MAX_TRIALS} trials per point"
     else STOP_STR="${STOP_MODE} on ${STOP_COUNT} failures (ACC_ERRORS=${ACC_ERRORS}, MAX_TRIALS=${MAX_TRIALS})"; fi
     echo "stop: ${STOP_STR}; P2_RATIO=${P2_RATIO}, QRAT=${QRAT}"
     echo "output dir=${OUTPUT_DIR}"
-    sbatch --cpus-per-task="${THREADS_PER_TASK}" --export=ALL \
+    sbatch --cpus-per-task="${THREADS_PER_TASK}" ${TIME_OPT} --export=ALL \
         --array="0-$((TOTAL_TASKS - 1))%${MAX_CONCURRENT}" "$0" "${NREPEATS}" "${MAX_CONCURRENT}"
     exit 0
 fi

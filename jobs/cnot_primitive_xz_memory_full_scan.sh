@@ -2,7 +2,7 @@
 #SBATCH --job-name=cnot_primitive_xz_memory_full_scan
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
-#SBATCH --time=12:00:00
+#SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -24,6 +24,12 @@ set -euo pipefail
 # set around the Stage-1 threshold estimate (~1.77%): 0.1% steps over
 # 1.4-2.3% for the crossing, 0.9% and 1.2% for the suppression factor, 2.7%
 # above.
+#
+# Time per task (one point, 10^5 trials, 16 threads): measured 2.6-3.3 ms per
+# trial on 8 threads of the development machine at L = 13, T = 2d, and
+# 8.9-11.9 ms at L = 19. Assuming cluster cores up to 2x slower, the slowest task
+# takes about 6 min at L = 13 and 20 min at L = 19, so the 2 h limit covers
+# L <= 19 with margin while keeping the jobs short for backfill.
 #
 # Submit from projects/mp-decoder:
 #   bash jobs/cnot_primitive_xz_memory_full_scan.sh [NREPEATS] [MAX_CONCURRENT]

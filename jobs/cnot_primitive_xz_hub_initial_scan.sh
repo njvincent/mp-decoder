@@ -7,9 +7,16 @@ set -euo pipefail
 # For each gap in GAPS, submits jobs/cnot_primitive_xz_hub_full_scan.sh with
 # initial-scan settings: L = 5 7 9, N = L, a wide coarse p grid, and 1000 hub
 # failures or 10^4 trials per point. Results go to
-# results/cnot_primitive_xz/hub/k_<k>/NL/. The jobs get their own name and log
-# files through sbatch's SBATCH_JOB_NAME, SBATCH_OUTPUT, and SBATCH_ERROR,
-# which override the full-scan script's #SBATCH lines.
+# results/cnot_primitive_xz/hub/k_<k>/NL/. The jobs get their own name, log
+# files, and time limit through sbatch's SBATCH_JOB_NAME, SBATCH_OUTPUT,
+# SBATCH_ERROR, and SBATCH_TIMELIMIT, which override the full-scan script's
+# #SBATCH lines.
+#
+# Time per task (one point, at most 10^4 trials, 16 threads): measured 9-11.5 ms
+# per trial on 8 threads of the development machine at L = 9 for k = 2-10.
+# Assuming cluster cores up to 2x slower, the slowest task takes about 2 min plus
+# Julia startup, so the default 30 min limit keeps a wide margin. Raise it
+# (SBATCH_TIMELIMIT=hh:mm:ss) for much larger L, k, or MAX_TRIALS.
 #
 # Submit from projects/mp-decoder:
 #   bash jobs/cnot_primitive_xz_hub_initial_scan.sh
@@ -25,6 +32,7 @@ INITIAL_P_LIST=${P_LIST:-"0.0015 0.002 0.0025 0.003 0.0035 0.004 0.005 0.006 0.0
 INITIAL_L_LIST=${L_LIST:-"5 7 9"}
 
 export SBATCH_JOB_NAME=cnot_primitive_xz_hub_initial_scan
+export SBATCH_TIMELIMIT="${SBATCH_TIMELIMIT:-00:30:00}"
 export SBATCH_OUTPUT="logs/cnot_primitive_xz_hub_initial_scan_%A_%a.out"
 export SBATCH_ERROR="logs/cnot_primitive_xz_hub_initial_scan_%A_%a.err"
 
