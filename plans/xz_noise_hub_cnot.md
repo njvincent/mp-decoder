@@ -301,11 +301,14 @@ Metrics, all from A's final readout unless stated:
    to that partner. A's final failures equal its own faults (final/own 1.003
    in X at `k = 1`).
 
-Statistics: `STOP_COUNT=hub` makes `ACC_ERRORS` count A's failures (A has
-about 0.7 of the failed trials).
+Statistics: full scans (hub and memory) run a fixed 10^5 trials per point.
+Initial scans stop at 1000 failures of A (`STOP_COUNT=hub`) or 10^4 trials.
 
 Memory reference: `memory` at `T in {d, 2d, 4d}` gives the per-round rate and
-Lake's `p_log(T=d)` (Stage 1, threshold 1.77%).
+Lake's `p_log(T=d)` (Stage 1, coarse: threshold about 1.77%). Its full scan
+(`jobs/cnot_primitive_xz_memory_full_scan.sh`) uses `T = d, 2d`, the same
+sizes and statistics as the hub full scans, and a `p` grid dense over
+1.4-2.3% with 0.9% and 1.2% for `Lambda`.
 
 Steady state: the working hypothesis was that A's buffer reaches steady state
 after about `ceil(Z/(k+1))` gates. At `k = 1`, `B` is 1 within errors over
@@ -399,9 +402,9 @@ Stage 2:
    notebook `notebooks/cnot_primitive_xz_hub_fixed_gap_analysis.ipynb`.
 9. Scans:
    - done (local): `k = 1`, `N = L, 2L`, `L = 5-13`, `p = 0.3-0.9%`;
-   - next, on the cluster: `k = 1` with `STOP_COUNT=hub`, more statistics,
-     and `L = 15-19`, to test whether A's crossing (0.53%) moves toward its
-     X sector's (0.52%);
+   - next, on the cluster: `k = 1` at 10^5 trials per point, with
+     `L = 15-19`, to test whether A's crossing (0.53%) moves toward its
+     X sector's (0.52%), and the memory full scan at the same sizes;
    - done (local initial scans): `k = 0` and `k = 3`, `L = 5, 7, 9`, `N = L`; the
      runners now carry their `p` grids;
    - then the full `k = 0` and `k = 3` scans (`L = 5-13`, `N = L, 2L`), other

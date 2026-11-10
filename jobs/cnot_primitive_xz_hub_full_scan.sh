@@ -20,7 +20,7 @@ set -euo pipefail
 # ratio are then fixed. One Slurm array task per (repeat, L, p, N); results go
 # to ${OUTPUT_DIR}/k_<k>/N<c>L/ ("NL" for c = 1).
 #
-# Defaults: k = 1, N = L and 2L, stopping on the hub's (A's) failures.
+# Defaults: k = 1, N = L and 2L, a fixed 10^5 trials per point (STOP_MODE=trials).
 # Each default p grid spans about 0.5-1.5 times the threshold, in steps of
 # about 5-7% of it near p_c. Measured thresholds: k = 0 ~0.35% and k = 3
 # ~0.55-0.6% (local initial scans, L = 5-9), k = 1 ~0.53%. Any other k needs P_LIST.
@@ -58,7 +58,7 @@ LOGZ=${LOGZ:-true}
 CLEANUP_TIME_DEFAULT=${CLEANUP_TIME:-auto}
 TRACK_FRAMES=${TRACK_FRAMES:-true}
 TRIAL_PARALLEL=${TRIAL_PARALLEL:-true}
-STOP_MODE=${STOP_MODE:-capped}
+STOP_MODE=${STOP_MODE:-trials}    # standard: a fixed MAX_TRIALS per point
 STOP_COUNT=${STOP_COUNT:-hub}     # failures ACC_ERRORS counts: hub (target A) or any (failed trials)
 ACC_ERRORS=${ACC_ERRORS:-2000}
 MAX_TRIALS=${MAX_TRIALS:-100000}
@@ -108,7 +108,9 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     mkdir -p logs "${OUTPUT_DIR}"
     echo "Submitting ${TOTAL_TASKS} hub tasks: L=(${L_STR}) p=(${P_STR}) N=(${N_STR}) k=${GAP_ROUNDS}"
     echo "repeats=${NREPEATS}, threads/task=${THREADS_PER_TASK}, max concurrent=${MAX_CONCURRENT}"
-    echo "stop=${STOP_MODE} on ${STOP_COUNT} failures (ACC_ERRORS=${ACC_ERRORS}, MAX_TRIALS=${MAX_TRIALS}), P2_RATIO=${P2_RATIO}, QRAT=${QRAT}"
+    if [[ "${STOP_MODE}" == "trials" ]]; then STOP_STR="${MAX_TRIALS} trials per point"
+    else STOP_STR="${STOP_MODE} on ${STOP_COUNT} failures (ACC_ERRORS=${ACC_ERRORS}, MAX_TRIALS=${MAX_TRIALS})"; fi
+    echo "stop: ${STOP_STR}; P2_RATIO=${P2_RATIO}, QRAT=${QRAT}"
     echo "output dir=${OUTPUT_DIR}"
     sbatch --cpus-per-task="${THREADS_PER_TASK}" --export=ALL \
         --array="0-$((TOTAL_TASKS - 1))%${MAX_CONCURRENT}" "$0" "${NREPEATS}" "${MAX_CONCURRENT}"

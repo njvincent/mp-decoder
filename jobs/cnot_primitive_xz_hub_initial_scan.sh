@@ -30,6 +30,6 @@ export SBATCH_ERROR="logs/cnot_primitive_xz_hub_initial_scan_%A_%a.err"
 
 for k in ${GAPS//,/ }; do
     GAP_ROUNDS="${k}" P_LIST="${INITIAL_P_LIST}" L_LIST="${INITIAL_L_LIST}" CNOT_COUNTS=L \
-    ACC_ERRORS="${ACC_ERRORS:-1000}" MAX_TRIALS="${MAX_TRIALS:-10000}" STOP_COUNT=hub \
+    STOP_MODE=capped ACC_ERRORS="${ACC_ERRORS:-1000}" MAX_TRIALS="${MAX_TRIALS:-10000}" STOP_COUNT=hub \
         bash "$(dirname "$0")/cnot_primitive_xz_hub_full_scan.sh" "$@"
 done
