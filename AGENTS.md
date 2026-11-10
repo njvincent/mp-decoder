@@ -77,11 +77,14 @@ sections and the existing implementation.
   - Both error sectors per block, single-qubit depolarizing noise, measurement
     noise, noisy CNOT rounds (two-qubit depolarizing, default `p2 = 10p`), and
     the primitive rule mirrored per sector. It has a schedule engine
-    (`memory`, `consecutive`; `hub` planned) and a non-allocating kernel that
-    is bit-exact against legacy `update!`.
+    (`memory`, `consecutive`, `hub`), logical-frame snapshots for own-fault
+    counts, and a non-allocating kernel that is bit-exact against legacy
+    `update!`.
   - Plan: `plans/xz_noise_hub_cnot.md`. Tests:
-    `test/cnot_primitive_xz_runtests.jl`. Local Stage-1 runner:
-    `jobs/cnot_primitive_xz_stage1_local.jl`.
+    `test/cnot_primitive_xz_runtests.jl` (git-ignored, local). Runners:
+    `jobs/cnot_primitive_xz_stage1_local.jl`,
+    `jobs/cnot_primitive_xz_hub_local.jl` (local, at most 8 threads),
+    `jobs/cnot_primitive_xz_hub_scan.sh` (Slurm).
 - `projects/mp-decoder/2d_windowed_history_visualizer.py`
   - History visualization support.
 - `projects/mp-decoder/2d_cnot_sheetcopy_visualizer.js`

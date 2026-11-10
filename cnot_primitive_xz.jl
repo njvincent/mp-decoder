@@ -719,6 +719,44 @@ function consecutive_schedule(intervals::Vector{Int}; hub_role::Symbol=:target)
     return Schedule("consecutive", blocks, events, total, desc)
 end
 
+"""
+    hub_schedule(d, N, k; hub_role=:target)
+
+Stage-2 hub circuit (plans/xz_noise_hub_cnot.md, Section 6). The hub A does N
+CNOT rounds, one with each fresh partner P_j, separated by k ordinary rounds:
+
+    tau_j = d + 1 + (j-1)(k+1)        CNOT round with partner j, j = 1..N
+    A     lives on [1, tau_N + d]
+    P_j   lives on [tau_j - d, tau_j + d]      (P_1 starts together with A)
+
+Every partner gets d ordinary rounds, its CNOT round, and d ordinary rounds
+(2d+1 in total) and is read out right after; A gets d ordinary rounds before
+its first CNOT, k between CNOTs, and d after the last. The hub is the target
+(default) or the control. `N = 1` is the same schedule as
+`consecutive_schedule([d, d])`.
+"""
+function hub_schedule(d::Int, N::Int, k::Int; hub_role::Symbol=:target)
+    d >= 1 || error("hub schedule needs d >= 1")
+    N >= 1 || error("hub schedule needs at least one CNOT")
+    k >= 0 || error("GAP_ROUNDS must be nonnegative")
+    hub_role in (:target, :control) || error("hub_role must be :target or :control")
+    taus = [d + 1 + (j - 1) * (k + 1) for j in 1:N]
+    last_round = taus[end] + d
+    blocks = [BlockSpec(:hub, 0, 1, last_round)]
+    append!(blocks, [BlockSpec(:partner, j, taus[j] - d, taus[j] + d) for j in 1:N])
+    events = [hub_role === :target ? CnotEvent(taus[j], j + 1, 1) : CnotEvent(taus[j], 1, j + 1) for j in 1:N]
+    desc = Dict{String,Any}(
+        "CNOT_COUNT" => N,
+        "GAP_ROUNDS" => k,
+        "TVAL" => d,
+        "CNOT_ROUNDS" => taus,
+        "PARTNER_ROUNDS" => 2d + 1,
+        "HUB_ROUNDS" => last_round,
+        "HUB_ROLE" => String(hub_role),
+    )
+    return Schedule("hub", blocks, events, last_round, desc)
+end
+
 """Schedule with precomputed per-round bookkeeping and static pool slots."""
 struct CompiledSchedule
     schedule::Schedule
@@ -798,6 +836,53 @@ struct SimParams
     cleanup_time::Int
 end
 
+"""
+Logical-frame bookkeeping (diagnostic). Logical errors propagate through the
+CNOTs (control X -> target, target Z -> control), so a block's final readout
+also contains faults that happened on other blocks. At every propagating CNOT
+the two source sectors (control X, target Z) are copied and decoded offline,
+and their logical bits are accumulated on the receiving block. At readout,
+`own = final xor inherited` then counts only the block's own logical faults,
+including the effect of decoding the history it absorbed. Snapshots use their
+own RNG and never touch the simulated trajectory.
+"""
+struct FrameTracker
+    scratch::Sector
+    rng::Xoshiro
+    inherited_x::Matrix{Bool}    # block id x winding bit
+    inherited_z::Matrix{Bool}
+end
+
+FrameTracker(L::Int, Z::Int, nblocks::Int, rng::Xoshiro) =
+    FrameTracker(Sector(L, Z), rng, fill(false, nblocks, 2), fill(false, nblocks, 2))
+
+"""
+    snapshot_logical_bits!(scratch, src, cleanup_time, ctx, rng) -> (bits, ok)
+
+Copy `src`, taken mid-round (after decoding and data noise, before its next
+measurement), into `scratch`; complete the round with a perfect measurement;
+run ideal cleanup rounds until the buffer is empty (at most `cleanup_time`);
+return the winding parities of `errors xor frame` and whether the buffer
+emptied.
+"""
+function snapshot_logical_bits!(scratch::Sector, src::Sector, cleanup_time::Int,
+                                ctx::KernelContext, rng::AbstractRNG)
+    copyto!(scratch.state.errors, src.state.errors)
+    copyto!(scratch.state.frame, src.state.frame)
+    copyto!(scratch.state.old_synds, src.state.old_synds)
+    copyto!(scratch.state.new_synds, src.state.new_synds)
+    copyto!(scratch.lane.hist, src.lane.hist)
+    copyto!(scratch.lane.fields, src.lane.fields)
+    measure_and_insert!(scratch, 0.0, ctx, rng)
+    for _ in 1:cleanup_time
+        lane_empty(scratch) && break
+        decode_step!(scratch, ctx, rng)
+        measure_and_insert!(scratch, 0.0, ctx, rng)
+    end
+    ok = lane_empty(scratch)
+    return winding_parities(scratch.state.errors .⊻ scratch.state.frame), ok
+end
+
 """Per-worker failure counts. A trial fails if any block fails."""
 mutable struct Counters
     trials::Int
@@ -818,11 +903,21 @@ mutable struct Counters
     partner_failures_by_index::Vector{Int}
     partner_x_failures_by_index::Vector{Int}
     partner_z_failures_by_index::Vector{Int}
+    # own logical faults (only filled when frames are tracked)
+    own_failure_trials::Int            # trials with any block having an own fault
+    hub_x_own_failures::Int
+    hub_z_own_failures::Int
+    partner_x_own_failures::Int
+    partner_z_own_failures::Int
+    partner_x_own_failures_by_index::Vector{Int}
+    partner_z_own_failures_by_index::Vector{Int}
+    snapshot_cleanup_failures::Int
 end
 
 Counters(npartners::Int) = Counters(0, 0, 0, 0, 0, 0, zeros(Int, 2), zeros(Int, 2), 0,
                                     0, 0, 0, 0, 0, 0,
-                                    zeros(Int, npartners), zeros(Int, npartners), zeros(Int, npartners))
+                                    zeros(Int, npartners), zeros(Int, npartners), zeros(Int, npartners),
+                                    0, 0, 0, 0, 0, zeros(Int, npartners), zeros(Int, npartners), 0)
 
 function add!(acc::Counters, c::Counters)
     for name in fieldnames(Counters)
@@ -837,23 +932,30 @@ function add!(acc::Counters, c::Counters)
 end
 
 """
-    run_trial!(cs, pool, params, ctx, rng, counters) -> trial_failed::Bool
+    run_trial!(cs, pool, params, ctx, rng, counters, frames=nothing) -> trial_failed::Bool
 
 One trial of a compiled schedule. Round order (plans/xz_noise_hub_cnot.md
 Section 3): decode all live blocks; single-qubit noise on all live blocks;
-CNOT events (ideal gate + decoder rule unless idle, then two-qubit noise);
-measure all live blocks; read out blocks whose last round this is.
+CNOT events (logical-frame snapshots if tracked, ideal gate + decoder rule
+unless idle, then two-qubit noise); measure all live blocks; read out blocks
+whose last round this is.
 """
 function run_trial!(cs::CompiledSchedule, pool::Vector{LogicalBlock}, params::SimParams,
-                    ctx::KernelContext, rng::AbstractRNG, c::Counters)
+                    ctx::KernelContext, rng::AbstractRNG, c::Counters,
+                    ft::Union{Nothing,FrameTracker}=nothing)
     s = cs.schedule
     trial_failed = false
     cleanup_failed = false
     hub_failed = false
     any_partner_failed = false
+    own_failed = false
     for tau in 1:s.last_round
         for id in cs.spawn_at[tau]
             reset!(pool[cs.slot[id]])
+            if ft !== nothing
+                ft.inherited_x[id, 1] = ft.inherited_x[id, 2] = false
+                ft.inherited_z[id, 1] = ft.inherited_z[id, 2] = false
+            end
         end
         live = cs.live_at[tau]
         for id in live
@@ -866,6 +968,15 @@ function run_trial!(cs::CompiledSchedule, pool::Vector{LogicalBlock}, params::Si
             cb = pool[cs.slot[ev.control]]
             tb = pool[cs.slot[ev.target]]
             if params.gate_mode === :cnot
+                if ft !== nothing
+                    (bx1, bx2), okx = snapshot_logical_bits!(ft.scratch, cb.x, params.cleanup_time, ctx, ft.rng)
+                    (bz1, bz2), okz = snapshot_logical_bits!(ft.scratch, tb.z, params.cleanup_time, ctx, ft.rng)
+                    ft.inherited_x[ev.target, 1] ⊻= bx1
+                    ft.inherited_x[ev.target, 2] ⊻= bx2
+                    ft.inherited_z[ev.control, 1] ⊻= bz1
+                    ft.inherited_z[ev.control, 2] ⊻= bz2
+                    c.snapshot_cleanup_failures += !okx + !okz
+                end
                 apply_transversal_cnot!(cb, tb)
                 apply_cnot_decoder_rule!(cb, tb, params.rule)
             end
@@ -900,6 +1011,20 @@ function run_trial!(cs::CompiledSchedule, pool::Vector{LogicalBlock}, params::Si
                 c.partner_x_failures_by_index[spec.index] += x_failed(r)
                 c.partner_z_failures_by_index[spec.index] += z_failed(r)
             end
+            if ft !== nothing
+                own_x = (r.x_bits[1] ⊻ ft.inherited_x[id, 1]) | (r.x_bits[2] ⊻ ft.inherited_x[id, 2])
+                own_z = (r.z_bits[1] ⊻ ft.inherited_z[id, 1]) | (r.z_bits[2] ⊻ ft.inherited_z[id, 2])
+                own_failed |= own_x | own_z
+                if spec.role === :hub
+                    c.hub_x_own_failures += own_x
+                    c.hub_z_own_failures += own_z
+                else
+                    c.partner_x_own_failures += own_x
+                    c.partner_z_own_failures += own_z
+                    c.partner_x_own_failures_by_index[spec.index] += own_x
+                    c.partner_z_own_failures_by_index[spec.index] += own_z
+                end
+            end
         end
     end
     c.trials += 1
@@ -907,6 +1032,7 @@ function run_trial!(cs::CompiledSchedule, pool::Vector{LogicalBlock}, params::Si
     c.cleanup_failures += cleanup_failed
     c.partner_failure_trials += any_partner_failed
     c.hub_and_partner_failure_trials += hub_failed & any_partner_failed
+    c.own_failure_trials += own_failed
     return trial_failed
 end
 
@@ -929,6 +1055,7 @@ Base.@kwdef struct XZConfig
     acc_errors::Int = 1000
     max_trials::Int = 100_000
     trial_parallel::Bool = true
+    track_frames::Bool = false        # logical-frame snapshots (own-fault counts)
     seed::UInt64 = rand(RandomDevice(), UInt64)
     verbose::Bool = false
 end
@@ -977,6 +1104,9 @@ function simulate(cfg::XZConfig)
         rng = Xoshiro(hash((cfg.seed, w)))
         ctx = KernelContext(cfg.L, cfg.Z, cfg.r)
         pool = [LogicalBlock(cfg.L, cfg.Z) for _ in 1:cs.nslots]
+        frames = cfg.track_frames ?
+            FrameTracker(cfg.L, cfg.Z, length(cs.schedule.blocks), Xoshiro(hash((cfg.seed, w, :frames)))) :
+            nothing
         c = Counters(cs.partner_count)
         while true
             if cfg.stop_mode == "trials"
@@ -986,7 +1116,7 @@ function simulate(cfg::XZConfig)
             else
                 (c.failures >= fail_quota[w] || c.trials >= trial_quota[w]) && break
             end
-            run_trial!(cs, pool, params, ctx, rng, c)
+            run_trial!(cs, pool, params, ctx, rng, c, frames)
             if cfg.verbose && c.trials % 10_000 == 0
                 println("worker $w: trials = $(c.trials), failures = $(c.failures)")
             end
@@ -1034,6 +1164,18 @@ function simulate(cfg::XZConfig)
         "wall_seconds" => time() - t0,
         "workers" => workers,
     )
+    if cfg.track_frames
+        merge!(data, Dict{String,Any}(
+            "own_failure_trials" => total.own_failure_trials,
+            "hub_x_own_failures" => total.hub_x_own_failures,
+            "hub_z_own_failures" => total.hub_z_own_failures,
+            "partner_x_own_failures" => total.partner_x_own_failures,
+            "partner_z_own_failures" => total.partner_z_own_failures,
+            "partner_x_own_failures_by_index" => total.partner_x_own_failures_by_index,
+            "partner_z_own_failures_by_index" => total.partner_z_own_failures_by_index,
+            "snapshot_cleanup_failures" => total.snapshot_cleanup_failures,
+        ))
+    end
     return data
 end
 
@@ -1060,6 +1202,7 @@ function params_record(cfg::XZConfig)
         "seed" => Int128(cfg.seed),
         "julia_threads" => nthreads(),
         "trial_parallel" => cfg.trial_parallel,
+        "TRACK_FRAMES" => cfg.track_frames,
         "synch" => true,
     )
     cfg.stop_mode != "trials" && (rec["acc_errors"] = cfg.acc_errors)
@@ -1095,6 +1238,9 @@ function result_filename(cfg::XZConfig)
     elseif s.name == "consecutive"
         "_seq$(s.description["CNOT_COUNT"])_I$(join(s.description["CNOT_INTERVALS"], "-"))" *
             (s.description["HUB_ROLE"] == "target" ? "" : "_hubcontrol")
+    elseif s.name == "hub"
+        "_N$(s.description["CNOT_COUNT"])_k$(s.description["GAP_ROUNDS"])_d$(s.description["TVAL"])" *
+            (s.description["HUB_ROLE"] == "target" ? "" : "_hubcontrol")
     else
         ""
     end
@@ -1129,11 +1275,18 @@ function config_from_env(env=ENV)
         intervals = parse_int_list(get(env, "CNOT_INTERVALS", "$T,$T"))
         hub_role = Symbol(lowercase(strip(get(env, "HUB_ROLE", "target"))))
         consecutive_schedule(intervals; hub_role=hub_role)
+    elseif name == "hub"
+        gap_env = lowercase(strip(get(env, "GAP_ROUNDS", "d")))
+        gap = gap_env == "d" ? T : parse(Int, gap_env)
+        hub_role = Symbol(lowercase(strip(get(env, "HUB_ROLE", "target"))))
+        hub_schedule(T, parse(Int, get(env, "CNOT_COUNT", "4")), gap; hub_role=hub_role)
     else
-        error("SCHEDULE must be memory or consecutive")
+        error("SCHEDULE must be memory, consecutive, or hub")
     end
     cleanup_env = lowercase(strip(get(env, "CLEANUP_TIME", "auto")))
     cleanup_time = cleanup_env == "auto" ? 2T : parse(Int, cleanup_env)
+    frames_env = lowercase(strip(get(env, "TRACK_FRAMES", "auto")))
+    track_frames = frames_env == "auto" ? name == "hub" : parse(Bool, frames_env)
     seed = haskey(env, "SEED") ? parse(UInt64, env["SEED"]) : rand(RandomDevice(), UInt64)
     return XZConfig(
         L=L, Z=Z,
@@ -1149,6 +1302,7 @@ function config_from_env(env=ENV)
         acc_errors=parse(Int, get(env, "ACC_ERRORS", "1000")),
         max_trials=parse(Int, get(env, "MAX_TRIALS", "100000")),
         trial_parallel=parse(Bool, get(env, "TRIAL_PARALLEL", "true")),
+        track_frames=track_frames,
         seed=seed,
         verbose=parse(Bool, get(env, "VERBOSE", "false")),
     )
@@ -1164,7 +1318,10 @@ function main()
     params = params_record(cfg)
     out = get(ENV, "OUTPUT_FILE", "")
     if isempty(out)
-        out = joinpath(get(ENV, "OUTPUT_DIR", "."), result_filename(cfg))
+        name = result_filename(cfg)
+        adj = get(ENV, "OUT_ADJ", "")          # e.g. "_rep3" to keep repeats apart
+        isempty(adj) || (name = replace(name, r"\.txt$" => "$(adj).txt"))
+        out = joinpath(get(ENV, "OUTPUT_DIR", "."), name)
     end
     write_result(out, data, params)
     println("trials = $(data["trials"]), failures = $(data["failures"]), fail_rate = $(data["fail_rate"])")
