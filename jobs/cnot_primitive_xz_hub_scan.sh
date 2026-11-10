@@ -21,13 +21,15 @@ set -euo pipefail
 # to ${OUTPUT_DIR}/k_<k>/N<c>L/ ("NL" for c = 1).
 #
 # Defaults: k = 1, N = L and 2L, stopping on the hub's (A's) failures.
-# The p grid spans about 0.5-1.5 times the threshold, in 0.05% steps near it.
-# Only k = 1 has a measured threshold (~0.53%); any other k needs P_LIST.
+# Each default p grid spans about 0.5-1.5 times the threshold, in steps of
+# about 5-7% of it near p_c. Measured thresholds: k = 0 ~0.35% and k = 3
+# ~0.55-0.6% (local pilots, L = 5-9), k = 1 ~0.53%. Any other k needs P_LIST.
 #
 # Submit from projects/mp-decoder:
 #   bash jobs/cnot_primitive_xz_hub_scan.sh [NREPEATS] [MAX_CONCURRENT]
 # Every setting below can be overridden from the environment, e.g.
-#   GAP_ROUNDS=3 P_LIST="0.004 0.005 0.006 0.007 0.008 0.009 0.010" L_LIST="5 7 9" bash jobs/cnot_primitive_xz_hub_scan.sh
+#   GAP_ROUNDS=3 bash jobs/cnot_primitive_xz_hub_scan.sh
+#   GAP_ROUNDS=2 P_LIST="0.004 0.005 0.006 0.007" L_LIST="5 7 9" CNOT_COUNTS=L bash jobs/cnot_primitive_xz_hub_scan.sh
 
 NREPEATS=${1:-${NREPEATS:-1}}
 MAX_CONCURRENT=${2:-${MAX_CONCURRENT:-30}}
@@ -36,7 +38,9 @@ GAP_ROUNDS=${GAP_ROUNDS:-1}
 [[ "${GAP_ROUNDS}" =~ ^[0-9]+$ ]] ||
     { echo "GAP_ROUNDS must be a nonnegative integer; got '${GAP_ROUNDS}'." >&2; exit 1; }
 case "${GAP_ROUNDS}" in
+    0) P_DEFAULT="0.002 0.0025 0.00275 0.003 0.00325 0.0035 0.00375 0.004 0.00425 0.0045 0.005" ;;
     1) P_DEFAULT="0.0025 0.003 0.0035 0.004 0.0045 0.005 0.0055 0.006 0.0065 0.007 0.008" ;;
+    3) P_DEFAULT="0.003 0.0035 0.004 0.0045 0.005 0.0055 0.006 0.0065 0.007 0.0075 0.0085" ;;
     *) P_DEFAULT="" ;;
 esac
 [[ -n "${P_LIST:-${P_DEFAULT}}" ]] ||

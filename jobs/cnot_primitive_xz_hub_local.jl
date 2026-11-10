@@ -14,7 +14,8 @@
 # Environment (space- or comma-separated lists):
 #   HUB_GAP          gap k, a nonnegative integer (default 1)
 #   HUB_N_LIST       CNOT counts as multiples of d = L: "L", "2L", ... (default "L 2L")
-#   HUB_P_LIST       default only for k = 1 (threshold ~0.53%); other k must set it
+#   HUB_P_LIST       defaults for k = 0, 1, 3 (thresholds ~0.35%, 0.53%, 0.55-0.6%);
+#                    other k must set it
 #   HUB_L_LIST       default "5 7 9 11 13"
 #   HUB_ACC_ERRORS, HUB_MAX_TRIALS   capped stopping (default 1500 failures or 10^4 trials)
 #   HUB_STOP_COUNT   which failures HUB_ACC_ERRORS counts: "hub" (target A,
@@ -27,8 +28,12 @@ parse_list(T, s) = [parse(T, e) for e in split(strip(s), r"[\s,]+") if !isempty(
 
 const GAP = parse(Int, get(ENV, "HUB_GAP", "1"))
 GAP >= 0 || error("HUB_GAP must be a nonnegative integer")
-# about 0.5-1.5 times the threshold, 0.05% steps near it; crossing region first
-const DEFAULT_P = Dict(1 => "0.005 0.0055 0.0045 0.006 0.004 0.0065 0.0035 0.007 0.003 0.008 0.0025")
+# about 0.5-1.5 times the threshold, steps of ~5-7% of it near p_c; crossing region first
+const DEFAULT_P = Dict(
+    0 => "0.0035 0.00325 0.00375 0.003 0.004 0.00275 0.00425 0.0025 0.0045 0.002 0.005",
+    1 => "0.005 0.0055 0.0045 0.006 0.004 0.0065 0.0035 0.007 0.003 0.008 0.0025",
+    3 => "0.0055 0.006 0.005 0.0065 0.0045 0.007 0.004 0.0075 0.0035 0.0085 0.003",
+)
 haskey(ENV, "HUB_P_LIST") || haskey(DEFAULT_P, GAP) ||
     error("no default p grid for HUB_GAP=$GAP (threshold not measured yet); set HUB_P_LIST")
 const P_LIST = parse_list(Float64, get(ENV, "HUB_P_LIST", get(DEFAULT_P, GAP, "")))

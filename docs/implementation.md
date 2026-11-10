@@ -1318,8 +1318,8 @@ Scan scripts:
 | Script | Purpose |
 | --- | --- |
 | `jobs/cnot_primitive_xz_stage1_local.jl` | Stage-1 grid in one local Julia process, resumable; writes `results/cnot_primitive_xz/stage1/<variant>/`. |
-| `jobs/cnot_primitive_xz_hub_local.jl` | Stage-2 hub grid in one local process; run with at most 8 threads on the development machine; resumable; writes `results/cnot_primitive_xz/hub/k_<k>/N<c>L/`. `HUB_GAP` is the gap `k` (default 1), the same at every `L`; `HUB_N_LIST` entries are multiples of `d = L` (default `L 2L`). Only `k = 1` has a default `p` grid (0.25-0.8%); other `k` need `HUB_P_LIST`. Stopping is capped at 1500 failures or 10^4 trials and counts the hub's failures by default (`HUB_STOP_COUNT=hub`); `any` runs get their own seed and filename, so the two kinds of run are independent. |
-| `jobs/cnot_primitive_xz_hub_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout: `GAP_ROUNDS` (default 1), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, `STOP_MODE=capped` (2000 failures or 10^5 trials) with `STOP_COUNT=hub`. The `k = 1` grid (0.25-0.8%, about 0.5-1.5 times the threshold, 0.05% steps near it) is the only default; other `k` need `P_LIST`. Not yet run on Slurm. |
+| `jobs/cnot_primitive_xz_hub_local.jl` | Stage-2 hub grid in one local process; run with at most 8 threads on the development machine; resumable; writes `results/cnot_primitive_xz/hub/k_<k>/N<c>L/`. `HUB_GAP` is the gap `k` (default 1), the same at every `L`; `HUB_N_LIST` entries are multiples of `d = L` (default `L 2L`). Default `p` grids exist for `k = 0` (0.2-0.5%), `k = 1` (0.25-0.8%), and `k = 3` (0.3-0.85%), each about 0.5-1.5 times that gap's measured threshold; other `k` need `HUB_P_LIST`. Stopping is capped at 1500 failures or 10^4 trials and counts the hub's failures by default (`HUB_STOP_COUNT=hub`); `any` runs get their own seed and filename, so the two kinds of run are independent. |
+| `jobs/cnot_primitive_xz_hub_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout: `GAP_ROUNDS` (default 1), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, `STOP_MODE=capped` (2000 failures or 10^5 trials) with `STOP_COUNT=hub`. The same default `p` grids as the local runner (`k = 0, 1, 3`); other `k` need `P_LIST`. Not yet run on Slurm. |
 
 #### 4.6.7 Kernel and overhead
 
@@ -1620,6 +1620,34 @@ Each block:
 - Readout cleanup failed in 552 trials, at most 3.4% (`L = 9`, `p = 0.9%`,
   `N = 2L`). Snapshot cleanup failed 2011 times, at most 5.5e-3 per CNOT.
   Both concentrate at `L = 9`.
+
+Other gaps: local pilots (`results/cnot_primitive_xz/hub/k_0/NL/`,
+`k_3/NL/`). `L = 5, 7, 9`, `N = L`, seven values of `p`, each point capped at
+1500 hub failures or 10^4 trials (`STOP_COUNT=hub`); 13 min (`k = 0`) and
+6 min (`k = 3`) on 8 threads. They only locate the thresholds for the `p`
+grids. The `k = 1` column uses the main scan restricted to the same sizes.
+
+~~~text
+L = 5, 7, 9; N = L                   k = 0        k = 1        k = 3
+pairwise crossing 5/7, 7/9:
+  A, either sector                   0.35, 0.35%  0.52, 0.50%  0.61, 0.54%
+  A, X sector (absorbing)            0.35, 0.35%  0.52, 0.47%  0.60, 0.50%
+  A, Z sector (source)               0.36, 0.42%  0.58, 0.61%  0.62, 0.70%
+eps_A at L = 9, p = 0.5%             0.0505       0.0230       0.0195
+Lambda_A at p = 0.5% (L = 5-9)       1.10         1.39         1.49
+~~~
+
+- `k = 0` (a CNOT every round) lowers the threshold to about 0.35%.
+- From `k = 1` to `k = 3` the either-sector crossing rises only slightly and
+  drifts down with `L` (0.61% to 0.54%). A's X sector barely moves (0.47% to
+  0.50% at 7/9), while its Z sector rises (0.61% to 0.70%).
+- The per-gate rate falls by only 15% from `k = 1` to `k = 3`, although A's
+  data noise per round falls from 3.33p to 2.0p.
+  - Inference: per gate, A's error is set mostly by the gate itself (its
+    two-qubit noise and the merge of the partner's X history), not by the idle
+    rounds between gates. Sparser gates then raise the fixed-aspect threshold
+    little beyond `k = 1`. The idle control (`GATE_MODE=idle`) at `k = 3`
+    would separate the merge from the gate noise.
 
 ## 6. Validation and Operational Caveats
 
