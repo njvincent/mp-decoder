@@ -81,10 +81,12 @@ sections and the existing implementation.
     counts, and a non-allocating kernel that is bit-exact against legacy
     `update!`.
   - Plan: `plans/xz_noise_hub_cnot.md`. Tests:
-    `test/cnot_primitive_xz_runtests.jl` (git-ignored, local). Runners:
-    `jobs/cnot_primitive_xz_stage1_local.jl`,
-    `jobs/cnot_primitive_xz_hub_local.jl` (local, at most 8 threads),
-    `jobs/cnot_primitive_xz_hub_scan.sh` (Slurm).
+    `test/cnot_primitive_xz_runtests.jl` (git-ignored, local). Scans:
+    `jobs/cnot_primitive_xz_hub_full_scan.sh` (Slurm, full scan) and
+    `jobs/cnot_primitive_xz_hub_initial_scan.sh` (Slurm, coarse initial scan per gap;
+    `hub_initial_scan_summary` in `notebooks/analysis_utils.py` locates the
+    threshold). `jobs/` holds shell scripts only; local runs call the driver
+    directly.
 - `projects/mp-decoder/2d_windowed_history_visualizer.py`
   - History visualization support.
 - `projects/mp-decoder/2d_cnot_sheetcopy_visualizer.js`

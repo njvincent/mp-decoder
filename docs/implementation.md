@@ -1313,13 +1313,13 @@ Environment variables: `SCHEDULE` (`memory`, `consecutive`, or `hub`), `LVAL`,
 nonnegative integer, default 1), `TRACK_FRAMES` (`auto`: on for `hub`), and
 `OUT_ADJ` (filename suffix, e.g. `_rep3`). `SYNCH=false` is rejected.
 
-Scan scripts:
+Scan scripts (`jobs/` holds shell scripts only). Local runs call the driver directly with these variables, e.g.
+`SCHEDULE=hub GAP_ROUNDS=1 LVAL=9 PVAL=0.005 STOP_MODE=capped STOP_COUNT=hub ACC_ERRORS=1500 MAX_TRIALS=10000 OUTPUT_DIR=results/cnot_primitive_xz/hub/k_1/NL julia --threads=8 cnot_primitive_xz.jl`.
 
 | Script | Purpose |
 | --- | --- |
-| `jobs/cnot_primitive_xz_stage1_local.jl` | Stage-1 grid in one local Julia process, resumable; writes `results/cnot_primitive_xz/stage1/<variant>/`. |
-| `jobs/cnot_primitive_xz_hub_local.jl` | Stage-2 hub grid in one local process; run with at most 8 threads on the development machine; resumable; writes `results/cnot_primitive_xz/hub/k_<k>/N<c>L/`. `HUB_GAP` is the gap `k` (default 1), the same at every `L`; `HUB_N_LIST` entries are multiples of `d = L` (default `L 2L`). Default `p` grids exist for `k = 0` (0.2-0.5%), `k = 1` (0.25-0.8%), and `k = 3` (0.3-0.85%), each about 0.5-1.5 times that gap's measured threshold; other `k` need `HUB_P_LIST`. Stopping is capped at 1500 failures or 10^4 trials and counts the hub's failures by default (`HUB_STOP_COUNT=hub`); `any` runs get their own seed and filename, so the two kinds of run are independent. |
-| `jobs/cnot_primitive_xz_hub_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout: `GAP_ROUNDS` (default 1), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, `STOP_MODE=capped` (2000 failures or 10^5 trials) with `STOP_COUNT=hub`. The same default `p` grids as the local runner (`k = 0, 1, 3`); other `k` need `P_LIST`. Not yet run on Slurm. |
+| `jobs/cnot_primitive_xz_hub_full_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout: `GAP_ROUNDS` (default 1), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, `STOP_MODE=capped` (2000 failures or 10^5 trials) with `STOP_COUNT=hub`. Default `p` grids exist for `k = 0` (0.2-0.5%), `k = 1` (0.25-0.8%), and `k = 3` (0.3-0.85%), each about 0.5-1.5 times that gap's measured threshold; other `k` need `P_LIST`. Not yet run on Slurm. |
+| `jobs/cnot_primitive_xz_hub_initial_scan.sh` | Coarse initial scan that locates a new gap's threshold: for each gap in `GAPS` (default `2 5 10`) it submits `jobs/cnot_primitive_xz_hub_full_scan.sh` with `L = 5, 7, 9`, `N = L`, 12 values of `p` from 0.15% to 1.2%, and 1000 hub failures or 10^4 trials per point. Its jobs and logs are named `cnot_primitive_xz_hub_initial_scan` (set through `SBATCH_JOB_NAME`, `SBATCH_OUTPUT`, `SBATCH_ERROR`). Results go to `results/cnot_primitive_xz/hub/k_<k>/NL/`; `hub_initial_scan_summary(root, k)` in `notebooks/analysis_utils.py` then gives A's failure probability per `(L, p)` and sector, the pairwise crossings of consecutive sizes (last + to - sign change), `p_c` from the largest pair, and a suggested `P_LIST` (0.5, 0.65, and 1.5 `p_c`, plus steps of about 7.5% of `p_c` over 0.8-1.25 `p_c`) as a ready scan command. On the existing data it gives 0.349% (`k = 0`), 0.521% (`k = 1`, `L = 11/13`), and 0.540% (`k = 3`). |
 
 #### 4.6.7 Kernel and overhead
 
@@ -1544,7 +1544,8 @@ Data: `results/cnot_primitive_xz/hub/k_1/{NL,N2L}/`. Analysis:
 `hub_block_rates`, `hub_target_rates`, `target_decay_grids`, and
 `target_point_grids` in `notebooks/analysis_utils.py`. Settings:
 
-- local run (`HUB_GAP=1 HUB_N_LIST="L 2L"`, 8 threads, 1.8 h): 100 points and
+- local run (8 threads, 1.8 h; made with a since-removed Julia runner, see
+  commit `86d161d`): 100 points and
   3.9e5 trials, each point capped at 1500 failed trials or 10^4 trials (it
   predates `STOP_COUNT=hub`; A has 0.68 of those failures);
 - `k = 1` at every `L` (one CNOT every two hub rounds), `N = L` and `2L`,
@@ -1621,7 +1622,7 @@ Each block:
   `N = 2L`). Snapshot cleanup failed 2011 times, at most 5.5e-3 per CNOT.
   Both concentrate at `L = 9`.
 
-Other gaps: local pilots (`results/cnot_primitive_xz/hub/k_0/NL/`,
+Other gaps: local initial scans (`results/cnot_primitive_xz/hub/k_0/NL/`,
 `k_3/NL/`). `L = 5, 7, 9`, `N = L`, seven values of `p`, each point capped at
 1500 hub failures or 10^4 trials (`STOP_COUNT=hub`); 13 min (`k = 0`) and
 6 min (`k = 3`) on 8 threads. They only locate the thresholds for the `p`

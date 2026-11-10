@@ -1229,3 +1229,79 @@ def target_point_grids(
             values["partner_first"][i, j], errors["partner_first"][i, j] = block.partners[0], block.partners_error[0]
             values["partner_last"][i, j], errors["partner_last"][i, j] = block.partners[-1], block.partners_error[-1]
     return {name: RateEstimate(values[name], errors[name]) for name in names}
+
+
+def last_crossing(p_values: Sequence[float], small_L: Sequence[float], large_L: Sequence[float]) -> float | None:
+    """p where ``small_L - large_L`` last changes sign from + to - (linear interpolation).
+
+    Taking the last change skips a noisy low-p tail where both rates are near 0.
+    """
+
+    diff = np.asarray(small_L, dtype=float) - np.asarray(large_L, dtype=float)
+    found = None
+    for j in range(len(p_values) - 1):
+        if diff[j] > 0 >= diff[j + 1]:
+            found = p_values[j] + diff[j] * (p_values[j + 1] - p_values[j]) / (diff[j] - diff[j + 1])
+    return None if found is None else float(found)
+
+
+def suggest_p_grid(pc: float) -> list[float]:
+    """Full-scan p grid around a threshold estimate ``pc``.
+
+    Steps of about 7.5% of ``pc`` (a round value) over 0.8-1.25 ``pc``, plus
+    0.5, 0.65, and 1.5 ``pc``; about 10 values from 0.5 to 1.5 ``pc``.
+    """
+
+    nice = np.array([1e-4, 2e-4, 2.5e-4, 5e-4, 1e-3, 2e-3])
+    step = nice[np.argmin(np.abs(np.log(nice / (0.075 * pc))))]
+    dense = np.arange(np.floor(0.8 * pc / step), np.ceil(1.25 * pc / step) + 1) * step
+    extra = [np.round(f * pc / step) * step for f in (0.5, 0.65, 1.5)]
+    return sorted({round(float(p), 6) for p in [*dense, *extra] if p > 0})
+
+
+def hub_initial_scan_summary(root: str | Path, gap: int) -> str:
+    """Locate a gap's threshold from a coarse initial scan (``jobs/cnot_primitive_xz_hub_initial_scan.sh``).
+
+    Uses the ``N = L`` runs in ``root/k_<gap>/`` at the ``p`` present for every
+    size: A's final failure probability per sector, the pairwise crossings of
+    consecutive sizes, ``p_c`` from the largest pair, and the suggested
+    ``P_LIST`` as a ready ``jobs/cnot_primitive_xz_hub_full_scan.sh`` command.
+    Pairwise crossings of small sizes only locate the threshold for the grid;
+    the full scan's finite-size fit is the measurement.
+    """
+
+    gap_key = str(int(gap))
+    groups = load_hub_records(Path(root) / f"k_{gap_key}")
+    L_values = sorted({key[1] for key in groups if key[3] == key[1]})
+    p_all = sorted({key[2] for key in groups if key[3] == key[1]})
+    p_values = [p for p in p_all if all((gap_key, L, p, L) in groups for L in L_values)]
+    if len(L_values) < 2 or len(p_values) < 2:
+        raise ValueError(f"need two sizes and two p values with N = L in {Path(root) / f'k_{gap_key}'}")
+    grids = target_point_grids(groups, gap_key, L_values, p_values, lambda L: L)
+    fmt = lambda p: f"{p:.6f}".rstrip("0").rstrip(".")
+    lines = [f"k = {gap_key}: N = L, L = {L_values}, {len(p_values)} values of p"]
+    crossings = {}
+    for name, sector in (("P_target", "either sector"), ("P_target_x", "X"), ("P_target_z", "Z")):
+        values = grids[name].values
+        lines.append(f"\nA's final failure probability, {sector}")
+        lines.append("   L " + "".join(f"{fmt(100 * p) + '%':>9}" for p in p_values))
+        lines += [f"  {L:>2} " + "".join(f"{v:9.4f}" for v in values[i]) for i, L in enumerate(L_values)]
+        pairs = [(L_values[i], L_values[i + 1], last_crossing(p_values, values[i], values[i + 1]))
+                 for i in range(len(L_values) - 1)]
+        lines.append("  pairwise crossings: " + ", ".join(
+            f"{a}/{b}: " + ("none" if c is None else f"{100 * c:.3f}%") for a, b, c in pairs))
+        crossings[name] = pairs[-1][2]
+    pc = crossings["P_target"]
+    if pc is None:
+        values = grids["P_target"].values
+        above = bool(np.all(values[-1] < values[0]))
+        lines.append(f"\nNo crossing between L = {L_values[-2]} and {L_values[-1]}: the threshold looks "
+                     + (f"above {fmt(100 * p_values[-1])}%; extend P_LIST upward." if above
+                        else f"below {fmt(100 * p_values[0])}%; extend P_LIST downward."))
+    else:
+        grid = suggest_p_grid(pc)
+        lines.append(f"\np_c estimate (L = {L_values[-2]}/{L_values[-1]}): {100 * pc:.3f}%")
+        lines.append(f"suggested full scan ({len(grid)} values of p):")
+        lines.append(f'  GAP_ROUNDS={gap_key} P_LIST="{" ".join(fmt(p) for p in grid)}" '
+                     "bash jobs/cnot_primitive_xz_hub_full_scan.sh")
+    return "\n".join(lines)

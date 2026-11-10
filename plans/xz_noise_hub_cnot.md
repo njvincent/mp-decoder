@@ -5,7 +5,7 @@ Status (2026-11-10): Stage 1 is implemented and scanned
 snapshots, local runner, and Slurm script are implemented for one design: a
 fixed gap `k` at every size and `N = c d` CNOTs. Its first local scan (`k = 1`,
 `N = L, 2L`, `results/cnot_primitive_xz/hub/k_1/`) is analyzed in
-`notebooks/cnot_primitive_xz_hub_fixed_gap_analysis.ipynb`. Local pilots at
+`notebooks/cnot_primitive_xz_hub_fixed_gap_analysis.ipynb`. Local initial scans at
 `k = 0` and `k = 3` (`L = 5-9`, `N = L`) located their thresholds for the
 `p` grids. The implementation
 is documented in `docs/implementation.md` Section 4.6, and the results in
@@ -389,9 +389,11 @@ Stage 2:
 
 6. Hub schedule and the hub/partner counters, frame snapshots, and
    `STOP_COUNT`; tests 7-9.
-7. `jobs/cnot_primitive_xz_hub_scan.sh` (Slurm) and
-   `jobs/cnot_primitive_xz_hub_local.jl`: arrays over `(p, L, c)` at one `k`,
-   writing to `results/cnot_primitive_xz/hub/k_<k>/N<c>L/`.
+7. `jobs/cnot_primitive_xz_hub_full_scan.sh` (Slurm array over `(p, L, c)` at one
+   `k`, writing to `results/cnot_primitive_xz/hub/k_<k>/N<c>L/`) and
+   `jobs/cnot_primitive_xz_hub_initial_scan.sh` (coarse initial scan per gap through the same
+   script; `hub_initial_scan_summary` in `notebooks/analysis_utils.py` locates the
+   threshold).
 8. `notebooks/analysis_utils.py`: loader, target and per-block rates, decay
    fit, `Lambda` regression, reuse of the finite-size fit; the analysis
    notebook `notebooks/cnot_primitive_xz_hub_fixed_gap_analysis.ipynb`.
@@ -400,11 +402,13 @@ Stage 2:
    - next, on the cluster: `k = 1` with `STOP_COUNT=hub`, more statistics,
      and `L = 15-19`, to test whether A's crossing (0.53%) moves toward its
      X sector's (0.52%);
-   - done (local pilots): `k = 0` and `k = 3`, `L = 5, 7, 9`, `N = L`; the
+   - done (local initial scans): `k = 0` and `k = 3`, `L = 5, 7, 9`, `N = L`; the
      runners now carry their `p` grids;
    - then the full `k = 0` and `k = 3` scans (`L = 5-13`, `N = L, 2L`), other
-     gaps after a pilot each, and the idle control (`GATE_MODE=idle`) at
-     `k = 3`, which separates the merge from the gate noise.
+     gaps after an initial scan each on the cluster (`jobs/cnot_primitive_xz_hub_initial_scan.sh`;
+     `hub_initial_scan_summary` prints the `P_LIST` for the full scan), and the idle control
+     (`GATE_MODE=idle`) at `k = 3`, which separates the merge from the gate
+     noise.
 10. Documentation: results in `docs/implementation.md` Section 5.2.9.
 
 ## 12. Limitations and open questions
@@ -430,7 +434,7 @@ Stage 2:
   - `Lambda_A` = 1.59, 1.34, 1.19 at `p` = 0.4, 0.5, 0.6%; `Lambda_A = 1`
     near 0.83%, above the threshold because of the per-gate normalization
     (Section 8 item 3).
-- Pilots at other gaps (`docs/implementation.md` Section 5.2.9, `L = 5-9`):
+- Initial scans at other gaps (`docs/implementation.md` Section 5.2.9, `L = 5-9`):
   A's threshold is about 0.35% at `k = 0` and 0.54-0.61% at `k = 3`, against
   0.50-0.52% for `k = 1` at the same sizes. From `k = 1` to `k = 3` A's X
   sector barely moves and the per-gate rate falls by only 15%. Inference: the

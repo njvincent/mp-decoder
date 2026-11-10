@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=cnot_xz_hub
+#SBATCH --job-name=cnot_primitive_xz_hub_full_scan
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
 #SBATCH --time=36:00:00
@@ -7,12 +7,12 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=8G
-#SBATCH --output=logs/cnot_xz_hub_%A_%a.out
-#SBATCH --error=logs/cnot_xz_hub_%A_%a.err
+#SBATCH --output=logs/cnot_primitive_xz_hub_full_scan_%A_%a.out
+#SBATCH --error=logs/cnot_primitive_xz_hub_full_scan_%A_%a.err
 
 set -euo pipefail
 
-# Hub scan for cnot_primitive_xz.jl (plans/xz_noise_hub_cnot.md, Stage 2).
+# Hub full scan for cnot_primitive_xz.jl (plans/xz_noise_hub_cnot.md, Stage 2).
 #
 # Design: the hub A (target) does N noisy CNOT rounds with fresh partners,
 # GAP_ROUNDS = k ordinary rounds apart, with the same k at every size, and
@@ -23,13 +23,13 @@ set -euo pipefail
 # Defaults: k = 1, N = L and 2L, stopping on the hub's (A's) failures.
 # Each default p grid spans about 0.5-1.5 times the threshold, in steps of
 # about 5-7% of it near p_c. Measured thresholds: k = 0 ~0.35% and k = 3
-# ~0.55-0.6% (local pilots, L = 5-9), k = 1 ~0.53%. Any other k needs P_LIST.
+# ~0.55-0.6% (local initial scans, L = 5-9), k = 1 ~0.53%. Any other k needs P_LIST.
 #
 # Submit from projects/mp-decoder:
-#   bash jobs/cnot_primitive_xz_hub_scan.sh [NREPEATS] [MAX_CONCURRENT]
+#   bash jobs/cnot_primitive_xz_hub_full_scan.sh [NREPEATS] [MAX_CONCURRENT]
 # Every setting below can be overridden from the environment, e.g.
-#   GAP_ROUNDS=3 bash jobs/cnot_primitive_xz_hub_scan.sh
-#   GAP_ROUNDS=2 P_LIST="0.004 0.005 0.006 0.007" L_LIST="5 7 9" CNOT_COUNTS=L bash jobs/cnot_primitive_xz_hub_scan.sh
+#   GAP_ROUNDS=3 bash jobs/cnot_primitive_xz_hub_full_scan.sh
+#   GAP_ROUNDS=2 P_LIST="0.004 0.005 0.006 0.007" L_LIST="5 7 9" CNOT_COUNTS=L bash jobs/cnot_primitive_xz_hub_full_scan.sh
 
 NREPEATS=${1:-${NREPEATS:-1}}
 MAX_CONCURRENT=${2:-${MAX_CONCURRENT:-30}}
