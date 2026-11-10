@@ -2,10 +2,10 @@
 #SBATCH --job-name=cnot_primitive_xz_hub_full_scan
 #SBATCH --partition=caslake
 #SBATCH --account=pi-liangjiang
-#SBATCH --time=06:00:00
+#SBATCH --time=03:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=8G
 #SBATCH --output=logs/cnot_primitive_xz_hub_full_scan_%A_%a.out
 #SBATCH --error=logs/cnot_primitive_xz_hub_full_scan_%A_%a.err
@@ -20,15 +20,20 @@ set -euo pipefail
 # ratio are then fixed. One Slurm array task per (repeat, L, p, N); results go
 # to ${OUTPUT_DIR}/k_<k>/N<c>L/ ("NL" for c = 1).
 #
-# Defaults: k = 1, N = L and 2L, a fixed 10^5 trials per point (STOP_MODE=trials).
+# Defaults: k = 1, N = L and 2L, a fixed 10^5 trials per point (STOP_MODE=trials),
+# split into NREPEATS tasks of MAX_TRIALS = 10^5 / NREPEATS each (independent
+# seeds, files _rep<r>; the analysis loader sums them).
 # Each default p grid spans about 0.5-1.5 times the threshold, in steps of
 # about 5-7% of it near p_c. Measured thresholds: k = 0 ~0.35% and k = 3
 # ~0.55-0.6% (local initial scans, L = 5-9), k = 1 ~0.53%. Any other k needs P_LIST.
 #
-# Time limit per task: the slowest point (N = 2L, 10^5 trials) measured about
-# 88 ms per trial at L = 13 and 450 ms at L = 19 on 8 threads of the development
-# machine. On 16 threads with cluster cores up to 2x slower that is about 2.5 h
-# and 12.5 h. The limit is 6 h when every L <= 13 and 24 h otherwise;
+# Task size, chosen to keep jobs small and short for backfill: 8 CPUs, and
+# NREPEATS = 4 when every L <= 13, 8 otherwise. The slowest point (N = 2L)
+# measured about 88 ms per trial at L = 13 and 450 ms at L = 19 on 8 threads of
+# the development machine; with cluster cores up to 2x slower, the slowest task
+# takes about 75 min (L = 13, 2.5e4 trials) and 3.1 h (L = 19, 1.25e4 trials).
+# The time limit is 3 h when every L <= 13 and 8 h otherwise, scaled with the
+# trials and threads per task if those are changed (at most 36 h);
 # SBATCH_TIMELIMIT=hh:mm:ss overrides it.
 #
 # Submit from projects/mp-decoder:
@@ -37,7 +42,7 @@ set -euo pipefail
 #   GAP_ROUNDS=3 bash jobs/cnot_primitive_xz_hub_full_scan.sh
 #   GAP_ROUNDS=2 P_LIST="0.004 0.005 0.006 0.007" L_LIST="5 7 9" CNOT_COUNTS=L bash jobs/cnot_primitive_xz_hub_full_scan.sh
 
-NREPEATS=${1:-${NREPEATS:-1}}
+NREPEATS=${1:-${NREPEATS:-auto}}   # tasks per point; auto: 4 if every L <= 13, else 8
 MAX_CONCURRENT=${2:-${MAX_CONCURRENT:-30}}
 
 GAP_ROUNDS=${GAP_ROUNDS:-1}
@@ -53,6 +58,8 @@ esac
     { echo "No default p grid for GAP_ROUNDS=${GAP_ROUNDS} (threshold not measured yet); set P_LIST." >&2; exit 1; }
 P_LIST=(${P_LIST:-${P_DEFAULT}})
 L_LIST=(${L_LIST:-5 7 9 11 13})
+MAX_L=$(printf '%s\n' "${L_LIST[@]}" | sort -n | tail -1)
+[[ "${NREPEATS}" == "auto" ]] && { if (( MAX_L <= 13 )); then NREPEATS=4; else NREPEATS=8; fi; }
 CNOT_COUNTS_NORMALIZED=${CNOT_COUNTS:-"L 2L"}
 CNOT_COUNTS_NORMALIZED=${CNOT_COUNTS_NORMALIZED//,/ }
 N_LIST=()
@@ -67,10 +74,12 @@ TRIAL_PARALLEL=${TRIAL_PARALLEL:-true}
 STOP_MODE=${STOP_MODE:-trials}    # standard: a fixed MAX_TRIALS per point
 STOP_COUNT=${STOP_COUNT:-hub}     # failures ACC_ERRORS counts: hub (target A) or any (failed trials)
 ACC_ERRORS=${ACC_ERRORS:-2000}
-MAX_TRIALS=${MAX_TRIALS:-100000}
+TOTAL_TRIALS=${TOTAL_TRIALS:-100000}   # per point, summed over its NREPEATS tasks
+[[ "${NREPEATS}" =~ ^[1-9][0-9]*$ ]] || { echo "NREPEATS must be a positive integer or auto." >&2; exit 1; }
+MAX_TRIALS=${MAX_TRIALS:-$(( (TOTAL_TRIALS + NREPEATS - 1) / NREPEATS ))}   # per task
 SEED_BASE=${SEED_BASE:-}
 JULIA_MODULE=${JULIA_MODULE:-julia}
-THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-16}}
+THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-8}}
 SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
 PROJECT_DIR=${PROJECT_DIR:-${SUBMIT_DIR}}
 JULIA_SCRIPT=${JULIA_SCRIPT:-cnot_primitive_xz.jl}
@@ -106,19 +115,22 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     P_STR="${P_LIST[*]}"
     L_STR="${L_LIST[*]}"
     N_STR="${N_LIST[*]}"
-    MAX_L=$(printf '%s\n' "${L_LIST[@]}" | sort -n | tail -1)
+    # limit: 3 h per 2.5e4 trials (L <= 13) or 8 h per 1.25e4 trials (L > 13) at 8
+    # threads, scaled by this task's trials and threads, at most 36 h
+    if (( MAX_L <= 13 )); then BASE_H=3; BASE_TRIALS=25000; else BASE_H=8; BASE_TRIALS=12500; fi
+    HOURS=$(( (BASE_H * MAX_TRIALS * 8 + BASE_TRIALS * THREADS_PER_TASK - 1) / (BASE_TRIALS * THREADS_PER_TASK) ))
+    (( HOURS > 36 )) && HOURS=36
     if [[ -n "${SBATCH_TIMELIMIT:-}" ]]; then TIME_OPT=""; TIME_STR="${SBATCH_TIMELIMIT}"
-    elif (( MAX_L <= 13 )); then TIME_OPT="--time=06:00:00"; TIME_STR="06:00:00"
-    else TIME_OPT="--time=24:00:00"; TIME_STR="24:00:00"; fi
+    else TIME_STR=$(printf '%02d:00:00' "${HOURS}"); TIME_OPT="--time=${TIME_STR}"; fi
     unset P_LIST L_LIST        # arrays cannot be exported; pass the lists as strings
     export P_LIST="${P_STR}" L_LIST="${L_STR}" CNOT_COUNTS="${N_STR}"
     export NREPEATS MAX_CONCURRENT GAP_ROUNDS QRAT P2_RATIO RVAL LOGZ TRACK_FRAMES TRIAL_PARALLEL
-    export STOP_MODE STOP_COUNT ACC_ERRORS MAX_TRIALS SEED_BASE JULIA_MODULE THREADS_PER_TASK PROJECT_DIR JULIA_SCRIPT OUTPUT_DIR
+    export STOP_MODE STOP_COUNT ACC_ERRORS MAX_TRIALS TOTAL_TRIALS SEED_BASE JULIA_MODULE THREADS_PER_TASK PROJECT_DIR JULIA_SCRIPT OUTPUT_DIR
     export CLEANUP_TIME="${CLEANUP_TIME_DEFAULT}"
     mkdir -p logs "${OUTPUT_DIR}"
     echo "Submitting ${TOTAL_TASKS} hub tasks: L=(${L_STR}) p=(${P_STR}) N=(${N_STR}) k=${GAP_ROUNDS}"
     echo "repeats=${NREPEATS}, threads/task=${THREADS_PER_TASK}, max concurrent=${MAX_CONCURRENT}, time limit/task=${TIME_STR}"
-    if [[ "${STOP_MODE}" == "trials" ]]; then STOP_STR="${MAX_TRIALS} trials per point"
+    if [[ "${STOP_MODE}" == "trials" ]]; then STOP_STR="${MAX_TRIALS} trials per task, $(( MAX_TRIALS * NREPEATS )) per point"
     else STOP_STR="${STOP_MODE} on ${STOP_COUNT} failures (ACC_ERRORS=${ACC_ERRORS}, MAX_TRIALS=${MAX_TRIALS})"; fi
     echo "stop: ${STOP_STR}; P2_RATIO=${P2_RATIO}, QRAT=${QRAT}"
     echo "output dir=${OUTPUT_DIR}"

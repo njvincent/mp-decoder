@@ -363,11 +363,13 @@ R = [2d + 1 + (N-1)(k+1)]  +  N (2d+1)  +  ~10 (N+1)     block-rounds, x 2 secto
 ~~~
 
 Partners dominate, at about `2d+1` rounds per gate, so with `N = c d` a trial
-costs `O(c d^2)` block-rounds of `O(d^2)` work each. Measured in the `k = 1`
-local scan at `L = 13` (frame tracking on): 0.23 s per trial and thread at
-`N = L`, 0.46 s at `N = 2L`. 10^5 trials of both take about 1.2 h per `p` on
-16 threads. At `L = 19`, scaling by the kernel time (2.4x) and `d^2` (2.1x)
-gives about 6 h per `p` on 16 threads, less where capped stopping ends early.
+costs `O(c d^2)` block-rounds of `O(d^2)` work each. Measured on 8 threads of
+the development machine (frame tracking on, `N = 2L`): about 88 ms per trial at
+`L = 13` and 450 ms at `L = 19`, for `k = 0-3`. With cluster cores assumed up
+to 2x slower, 10^5 trials of one `N = 2L` point cost about 5 h on 8 CPUs at
+`L = 13` and 25 h at `L = 19`. The full-scan script therefore splits each point
+into 4 tasks (8 for `L > 13`) of 8 CPUs, about 75 min and 3.1 h each, to keep
+jobs short for backfill.
 
 ## 11. Implementation steps
 
