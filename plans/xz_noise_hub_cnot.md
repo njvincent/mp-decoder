@@ -409,7 +409,9 @@ Stage 2:
      X sector's (0.52%), and the memory full scan at the same sizes;
    - done: initial scans at `k = 0, 3` (local) and `k = 2, 5, 10` (RCC),
      `L = 5, 7, 9`, `N = L`; the memory full scan (RCC);
-   - then the full scans at `k = 0, 2, 5, 10` (`L = 5-13`, `N = L, 2L`), the
+   - done (RCC): full scans at `k = 0, 1, 2, 5, 10` (`L = 5-13`, `N = L, 2L`,
+     10^5 trials per point; `docs/implementation.md` Section 5.2.9);
+   - planned at the time: the full scans at `k = 0, 2, 5, 10` (`L = 5-13`, `N = L, 2L`), the
      default of `jobs/cnot_primitive_xz_hub_full_scan.sh` (`k = 2, 5, 10`
      share one grid, 0.3-0.85%; `k = 1` and `3` can be run by setting
      `GAP_ROUNDS`);
@@ -431,7 +433,14 @@ Stage 2:
   0.07%. The merge also doubles the failure probability of the absorbing
   sectors at fixed `p`. Smaller `k` stacks gate noise on A and is expected to
   push the crossing lower.
-- Stage-2 result (`docs/implementation.md` Section 5.2.9), `k = 1`,
+- Stage-2 full scans (`docs/implementation.md` Section 5.2.9), `L = 5-13`:
+  A's threshold is 0.37% (`k = 0`), 0.54% (`k = 1`), 0.62% (`k = 2`), 0.68%
+  (`k = 5`), and 0.69-0.70% (`k = 10`), saturating near `k = 5` at about 0.39
+  of memory's 1.79%. The hub's Z history needs about 6-10 rounds (the buffer
+  depth) to settle after a gate, so gates closer than that cost more. The
+  target's X sector (merge) limits at every gap. Next: `L = 15-19` at `k = 2`
+  and 5, and the Y-junction rule.
+- First local Stage-2 result, `k = 1`,
   `N = L, 2L`:
   - A's fixed-aspect threshold is 0.533(5)% at `N = L` and 0.532(5)% at
     `N = 2L` (0.53-0.54% over fit choices), 0.30 of the memory threshold.
