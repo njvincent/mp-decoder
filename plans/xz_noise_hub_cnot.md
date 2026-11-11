@@ -5,11 +5,11 @@ Status (2026-11-10): Stage 1 is implemented and scanned
 snapshots, local runner, and Slurm script are implemented for one design: a
 fixed gap `k` at every size and `N = c d` CNOTs. Its first local scan (`k = 1`,
 `N = L, 2L`, `results/cnot_primitive_xz/hub/k_1/`) is analyzed in
-`notebooks/cnot_primitive_xz_hub_fixed_gap_analysis.ipynb`. Local initial scans at
-`k = 0` and `k = 3` (`L = 5-9`, `N = L`) located their thresholds for the
-`p` grids. The implementation
-is documented in `docs/implementation.md` Section 4.6, and the results in
-Sections 5.2.8-5.2.9.
+`notebooks/cnot_primitive_xz_hub_analysis.ipynb`. Initial scans at
+`k = 0, 2, 3, 5, 10` (`L = 5-9`, `N = L`) located their thresholds, and the
+memory full scan gives the reference threshold (1.79%). The implementation is
+documented in `docs/implementation.md` Section 4.6, and the results in
+Sections 5.2.8-5.2.10.
 
 Stage 1 adds both error sectors, depolarizing data noise, and noisy CNOT
 rounds. Stage 2 adds the hub circuit and the target's per-gate error rate,
@@ -304,11 +304,10 @@ Metrics, all from A's final readout unless stated:
 Statistics: full scans (hub and memory) run a fixed 10^5 trials per point.
 Initial scans stop at 1000 failures of A (`STOP_COUNT=hub`) or 10^4 trials.
 
-Memory reference: `memory` at `T in {d, 2d, 4d}` gives the per-round rate and
-Lake's `p_log(T=d)` (Stage 1, coarse: threshold about 1.77%). Its full scan
-(`jobs/cnot_primitive_xz_memory_full_scan.sh`) uses `T = d, 2d`, the same
-sizes and statistics as the hub full scans, and a `p` grid dense over
-1.4-2.3% with 0.9% and 1.2% for `Lambda`.
+Memory reference: the memory full scan (`jobs/cnot_primitive_xz_memory_full_scan.sh`,
+`T = d, 2d`, `L = 5-13`, 10^5 trials per point) gives the threshold of the
+same noise model without gates, 1.79% (`docs/implementation.md` Section
+5.2.10), and the per-round `Lambda`.
 
 Steady state: the working hypothesis was that A's buffer reaches steady state
 after about `ceil(Z/(k+1))` gates. At `k = 1`, `B` is 1 within errors over
@@ -401,20 +400,22 @@ Stage 2:
    threshold).
 8. `notebooks/analysis_utils.py`: loader, target and per-block rates, decay
    fit, `Lambda` regression, reuse of the finite-size fit; the analysis
-   notebook `notebooks/cnot_primitive_xz_hub_fixed_gap_analysis.ipynb`.
+   notebooks `notebooks/cnot_primitive_xz_hub_analysis.ipynb` (initial and
+   full scans of every gap) and `notebooks/cnot_primitive_xz_memory_analysis.ipynb`.
 9. Scans:
    - done (local): `k = 1`, `N = L, 2L`, `L = 5-13`, `p = 0.3-0.9%`;
    - next, on the cluster: `k = 1` at 10^5 trials per point, with
      `L = 15-19`, to test whether A's crossing (0.53%) moves toward its
      X sector's (0.52%), and the memory full scan at the same sizes;
-   - done (local initial scans): `k = 0` and `k = 3`, `L = 5, 7, 9`, `N = L`; the
-     runners now carry their `p` grids;
-   - then the full `k = 0` and `k = 3` scans (`L = 5-13`, `N = L, 2L`), other
-     gaps after an initial scan each on the cluster (`jobs/cnot_primitive_xz_hub_initial_scan.sh`;
-     `hub_initial_scan_summary` prints the `P_LIST` for the full scan), and the idle control
-     (`GATE_MODE=idle`) at `k = 3`, which separates the merge from the gate
-     noise.
-10. Documentation: results in `docs/implementation.md` Section 5.2.9.
+   - done: initial scans at `k = 0, 3` (local) and `k = 2, 5, 10` (RCC),
+     `L = 5, 7, 9`, `N = L`; the memory full scan (RCC);
+   - then the full scans at `k = 0, 2, 5, 10` (`L = 5-13`, `N = L, 2L`), the
+     default of `jobs/cnot_primitive_xz_hub_full_scan.sh` (`k = 2, 5, 10`
+     share one grid, 0.3-0.85%; `k = 1` and `3` can be run by setting
+     `GAP_ROUNDS`);
+     and the idle control (`GATE_MODE=idle`), which separates the merge from
+     the gate noise.
+10. Documentation: results in `docs/implementation.md` Sections 5.2.9-5.2.10.
 
 ## 12. Limitations and open questions
 
@@ -440,11 +441,14 @@ Stage 2:
     near 0.83%, above the threshold because of the per-gate normalization
     (Section 8 item 3).
 - Initial scans at other gaps (`docs/implementation.md` Section 5.2.9, `L = 5-9`):
-  A's threshold is about 0.35% at `k = 0` and 0.54-0.61% at `k = 3`, against
-  0.50-0.52% for `k = 1` at the same sizes. From `k = 1` to `k = 3` A's X
-  sector barely moves and the per-gate rate falls by only 15%. Inference: the
-  per-gate error is set mostly by the gate (two-qubit noise and merge), so
-  sparser gates help little beyond `k = 1`.
+  A's threshold is about 0.35% at `k = 0` and 0.50-0.52% at `k = 1`, then
+  levels off at 0.54-0.66% for `k = 2-10`, about a third of memory's 1.79%.
+  The error per CNOT also levels off from `k = 2` on. Inference: the gate
+  (two-qubit noise and merge) sets A's error, so sparser gates help little.
+  The 7/9 crossings are probably biased low by the `L = 9` anomaly.
+- Memory full scan (`docs/implementation.md` Section 5.2.10): threshold 1.79%;
+  `L = 9` fails 4-11% more than its neighbours' geometric mean, a decoder size
+  effect of unknown cause.
 - `Lambda` comes from `L = 5-13` only. Lake's gerrymandering theorem implies
   suppression slower than `(L+1)/2` asymptotically for this decoder.
 - Next stage (Y-junction): with `k < Z`, a new gate reaches A before the

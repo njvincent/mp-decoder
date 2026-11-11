@@ -1259,7 +1259,7 @@ def suggest_p_grid(pc: float) -> list[float]:
     return sorted({round(float(p), 6) for p in [*dense, *extra] if p > 0})
 
 
-def hub_initial_scan_summary(root: str | Path, gap: int) -> str:
+def hub_initial_scan_summary(root: str | Path, gap: int, pattern: str = "2d_XZ_hub_*.txt") -> str:
     """Locate a gap's threshold from a coarse initial scan (``jobs/cnot_primitive_xz_hub_initial_scan.sh``).
 
     Uses the ``N = L`` runs in ``root/k_<gap>/`` at the ``p`` present for every
@@ -1267,11 +1267,13 @@ def hub_initial_scan_summary(root: str | Path, gap: int) -> str:
     consecutive sizes, ``p_c`` from the largest pair, and the suggested
     ``P_LIST`` as a ready ``jobs/cnot_primitive_xz_hub_full_scan.sh`` command.
     Pairwise crossings of small sizes only locate the threshold for the grid;
-    the full scan's finite-size fit is the measurement.
+    the full scan's finite-size fit is the measurement. ``pattern`` selects
+    the result files, e.g. ``"2d_XZ_hub_*_hubfail*.txt"`` for the initial-scan
+    files alone once a full scan shares the folder.
     """
 
     gap_key = str(int(gap))
-    groups = load_hub_records(Path(root) / f"k_{gap_key}")
+    groups = load_hub_records(Path(root) / f"k_{gap_key}", pattern=pattern)
     L_values = sorted({key[1] for key in groups if key[3] == key[1]})
     p_all = sorted({key[2] for key in groups if key[3] == key[1]})
     p_values = [p for p in p_all if all((gap_key, L, p, L) in groups for L in L_values)]
