@@ -20,12 +20,15 @@ set -euo pipefail
 # ratio are then fixed. One Slurm array task per (repeat, L, p, N); results go
 # to ${OUTPUT_DIR}/k_<k>/N<c>L/ ("NL" for c = 1).
 #
-# Defaults: k = 1, N = L and 2L, a fixed 10^5 trials per point (STOP_MODE=trials),
+# Defaults: k = 0, 2, 5, 10 (GAP_ROUNDS takes a list; each gap is submitted as its
+# own Slurm array with its own default p grid), N = L and 2L, a fixed 10^5
+# trials per point (STOP_MODE=trials),
 # split into NREPEATS tasks of MAX_TRIALS = 10^5 / NREPEATS each (independent
 # seeds, files _rep<r>; the analysis loader sums them).
 # Each default p grid spans about 0.5-1.5 times the threshold, in steps of
-# about 5-7% of it near p_c. Measured thresholds: k = 0 ~0.35% and k = 3
-# ~0.55-0.6% (local initial scans, L = 5-9), k = 1 ~0.53%. Any other k needs P_LIST.
+# about 5-7% of it near p_c. Measured thresholds (initial scans, L = 5-9):
+# k = 0 ~0.35%, k = 1 ~0.53%, and 0.54-0.66% for k = 2, 3, 5, 10, which share
+# one grid so their rates can be compared at equal p. Any other k needs P_LIST.
 #
 # Task size, chosen to keep jobs small and short for backfill: 8 CPUs, and
 # NREPEATS = 4 when every L <= 13, 8 otherwise. The slowest point (N = 2L)
@@ -39,24 +42,38 @@ set -euo pipefail
 # Submit from projects/mp-decoder:
 #   bash jobs/cnot_primitive_xz_hub_full_scan.sh [NREPEATS] [MAX_CONCURRENT]
 # Every setting below can be overridden from the environment, e.g.
-#   GAP_ROUNDS=3 bash jobs/cnot_primitive_xz_hub_full_scan.sh
+#   GAP_ROUNDS=1 bash jobs/cnot_primitive_xz_hub_full_scan.sh
+#   GAP_ROUNDS="1 3" bash jobs/cnot_primitive_xz_hub_full_scan.sh
+# With several gaps, MAX_CONCURRENT applies to each gap's array, and P_LIST (if
+# given) to every gap.
 #   GAP_ROUNDS=2 P_LIST="0.004 0.005 0.006 0.007" L_LIST="5 7 9" CNOT_COUNTS=L bash jobs/cnot_primitive_xz_hub_full_scan.sh
 
 NREPEATS=${1:-${NREPEATS:-auto}}   # tasks per point; auto: 4 if every L <= 13, else 8
 MAX_CONCURRENT=${2:-${MAX_CONCURRENT:-30}}
 
-GAP_ROUNDS=${GAP_ROUNDS:-1}
-[[ "${GAP_ROUNDS}" =~ ^[0-9]+$ ]] ||
-    { echo "GAP_ROUNDS must be a nonnegative integer; got '${GAP_ROUNDS}'." >&2; exit 1; }
-case "${GAP_ROUNDS}" in
-    0) P_DEFAULT="0.002 0.0025 0.00275 0.003 0.00325 0.0035 0.00375 0.004 0.00425 0.0045 0.005" ;;
-    1) P_DEFAULT="0.0025 0.003 0.0035 0.004 0.0045 0.005 0.0055 0.006 0.0065 0.007 0.008" ;;
-    3) P_DEFAULT="0.003 0.0035 0.004 0.0045 0.005 0.0055 0.006 0.0065 0.007 0.0075 0.0085" ;;
-    *) P_DEFAULT="" ;;
-esac
-[[ -n "${P_LIST:-${P_DEFAULT}}" ]] ||
-    { echo "No default p grid for GAP_ROUNDS=${GAP_ROUNDS} (threshold not measured yet); set P_LIST." >&2; exit 1; }
-P_LIST=(${P_LIST:-${P_DEFAULT}})
+default_p_grid() {   # a gap's default p grid; empty if its threshold is not measured
+    case "$1" in
+        0) echo "0.002 0.0025 0.00275 0.003 0.00325 0.0035 0.00375 0.004 0.00425 0.0045 0.005" ;;
+        1) echo "0.0025 0.003 0.0035 0.004 0.0045 0.005 0.0055 0.006 0.0065 0.007 0.008" ;;
+        2|3|5|10) echo "0.003 0.0035 0.004 0.0045 0.005 0.0055 0.006 0.0065 0.007 0.0075 0.0085" ;;
+    esac
+}
+
+GAP_ROUNDS=${GAP_ROUNDS:-"0 2 5 10"}
+GAP_LIST=(${GAP_ROUNDS//,/ })
+for k in "${GAP_LIST[@]}"; do        # check every gap before submitting any
+    [[ "${k}" =~ ^[0-9]+$ ]] ||
+        { echo "GAP_ROUNDS entries must be nonnegative integers; got '${k}'." >&2; exit 1; }
+    [[ -n "${P_LIST:-$(default_p_grid "${k}")}" ]] ||
+        { echo "No default p grid for GAP_ROUNDS=${k} (threshold not measured yet); set P_LIST." >&2; exit 1; }
+done
+if (( ${#GAP_LIST[@]} > 1 )) && [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+    for k in "${GAP_LIST[@]}"; do      # one submission (and array) per gap
+        GAP_ROUNDS="${k}" bash "$0" "$@"
+    done
+    exit 0
+fi
+P_LIST=(${P_LIST:-$(default_p_grid "${GAP_ROUNDS}")})
 L_LIST=(${L_LIST:-5 7 9 11 13})
 MAX_L=$(printf '%s\n' "${L_LIST[@]}" | sort -n | tail -1)
 [[ "${NREPEATS}" == "auto" ]] && { if (( MAX_L <= 13 )); then NREPEATS=4; else NREPEATS=8; fi; }
