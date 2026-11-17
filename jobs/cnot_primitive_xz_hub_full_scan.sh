@@ -18,7 +18,9 @@ set -euo pipefail
 # GAP_ROUNDS = k ordinary rounds apart, with the same k at every size, and
 # N = c d CNOTs with d = L. The gate density 1/(k+1) and the circuit's aspect
 # ratio are then fixed. One Slurm array task per (repeat, L, p, N); results go
-# to ${OUTPUT_DIR}/k_<k>/N<c>L/ ("NL" for c = 1).
+# to ${OUTPUT_DIR}/k_<k>/N<c>L/ ("NL" for c = 1). Noise convention: p is the
+# two-qubit gate error rate (P2_RATIO = 1), single-qubit noise 0.1p, q = p
+# (QRAT = 1); results/cnot_primitive_xz/hub/ holds the previous convention.
 #
 # Defaults: k = 0, 1, 2, 5, 10 and L = 5, 7, 9, 13, 19. GAP_ROUNDS and L_LIST take
 # lists; each gap, and within it the sizes L <= 13 and L > 13, is submitted as
@@ -32,7 +34,9 @@ set -euo pipefail
 # k = 10 0.69%; k = 3 (initial scan only) shares k = 2's grid. Grids from
 # k = 2 up coincide below 0.85%, so rates compare at equal p. Any other k needs
 # P_LIST. To add points to an existing scan, pass only the new ones in P_LIST:
-# resubmitting a default grid reruns every point.
+# resubmitting a default grid reruns every point. These thresholds and grids
+# are from the previous convention (p = single-qubit rate, p2 = 10p, q = p) and
+# are not yet re-centered for the current one.
 #
 # Task size, chosen to keep jobs small and short for backfill: 8 CPUs, and
 # NREPEATS = 4 when every L <= 13, 8 otherwise. The slowest point (N = 2L)
@@ -99,7 +103,7 @@ CNOT_COUNTS_NORMALIZED=${CNOT_COUNTS_NORMALIZED//,/ }
 N_LIST=()
 read -r -a N_LIST <<< "${CNOT_COUNTS_NORMALIZED}"
 QRAT=${QRAT:-1}
-P2_RATIO=${P2_RATIO:-10}
+P2_RATIO=${P2_RATIO:-1}
 RVAL=${RVAL:-3}
 LOGZ=${LOGZ:-true}
 CLEANUP_TIME_DEFAULT=${CLEANUP_TIME:-auto}
@@ -117,7 +121,7 @@ THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-8}}
 SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
 PROJECT_DIR=${PROJECT_DIR:-${SUBMIT_DIR}}
 JULIA_SCRIPT=${JULIA_SCRIPT:-cnot_primitive_xz.jl}
-OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_primitive_xz/hub}
+OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_primitive_xz/p_2q/hub}
 
 [[ "${PROJECT_DIR}" == /* ]] || PROJECT_DIR="${SUBMIT_DIR}/${PROJECT_DIR}"
 [[ "${JULIA_SCRIPT}" == /* ]] || JULIA_SCRIPT="${PROJECT_DIR}/${JULIA_SCRIPT}"

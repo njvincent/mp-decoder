@@ -11,6 +11,10 @@ memory full scan gives the reference threshold (1.78%). The implementation is
 documented in `docs/implementation.md` Section 4.6, and the results in
 Sections 5.2.8-5.2.10.
 
+Noise convention changed on 2026-11-17 (Section 1): `p` is now the two-qubit
+gate error rate, single-qubit noise is `0.1p`, and `q = p`. All results above
+use the previous convention (`p` = single-qubit rate, `p2 = 10p`, `q = p`).
+
 Stage 1 adds both error sectors, depolarizing data noise, and noisy CNOT
 rounds. Stage 2 adds the hub circuit and the target's per-gate error rate,
 threshold, and suppression factor, plus a rate for every block. A Y-junction
@@ -20,9 +24,10 @@ gate rule is a later stage (Section 12).
 
 | Item | Decision |
 | --- | --- |
-| Data noise per round | Single-qubit depolarizing with total probability `p`: X, Y, Z each with `p/3`, on every data qubit of every live block. |
-| Measurement noise | Every X-type and Z-type syndrome bit flips independently with `q = QRAT * p` (default `QRAT = 1`), as now. |
-| Gate noise | After each transversal CNOT, every physical pair gets a two-qubit depolarizing channel of total `p2 = 10p`: each of the 15 non-identity Paulis with `10p/15`. The ratio is exposed as `P2_RATIO` (default 10). |
+| Noise unit (2026-11-17) | `p` is the two-qubit gate error rate. Previously `p` was the single-qubit rate, with `p2 = 10p` and `q = p`; those results are in `results/cnot_primitive_xz/{stage1,hub,memory}/`, new ones in `results/cnot_primitive_xz/p_2q/`. |
+| Data noise per round | Single-qubit depolarizing with total probability `p1 = 0.1p`: X, Y, Z each with `0.1p/3`, on every data qubit of every live block. |
+| Measurement noise | Every X-type and Z-type syndrome bit flips independently with `q = QRAT * p` (default `QRAT = 1`: `q` equals the two-qubit gate error rate). |
+| Gate noise | After each transversal CNOT, every physical pair gets a two-qubit depolarizing channel of total `p2 = P2_RATIO * p` (default `P2_RATIO = 1`): each of the 15 non-identity Paulis with `p/15`. |
 | CNOT round | single-qubit noise -> ideal CNOT -> two-qubit noise -> noisy syndrome -> decoder update. The CNOT round is one round. |
 | Decoder rule at a gate | Primitive merge, mirrored for the Z sector (Section 4). Y-junction comes in the next stage. |
 | Hub direction | A is always the target. |
@@ -87,16 +92,16 @@ split into three phases:
 
 1. decode, per sector: `r` message sweeps, feedback proposals, frame update,
    history commit (legacy steps 1-6, same tie order and 0.8 back-wall draw);
-2. data noise: draw one Pauli per edge `e`, with X/Y/Z each at `p/3`;
+2. data noise: draw one Pauli per edge `e`, with X/Y/Z each at `p1/3`
+   (`p1 = 0.1p`);
    `x[e] xor= (X or Y)` and `zdual[sigma(e)] xor= (Z or Y)`;
 3. measure, per sector: `old = new`, `new = get_synds xor Bernoulli(q)`, RG
    cycle, insert `old xor new` at `k=1` (legacy steps 8-10).
 
-Per-sector marginals: the data flip rate is `2p/3` per round (X and Z flips
-correlated, `P(both) = p/3`), and the measurement flip rate is `q`. The old
-model flipped X with probability `p`, so at the same `p` and `q` the per-sector
-data noise is now 2/3 of before. Thresholds on the `p` axis are therefore not
-directly comparable with the existing X-only scans.
+Per-sector marginals: the data flip rate is `2p1/3 = p/15` per round (X and
+Z flips correlated, `P(both) = p1/3`), and the measurement flip rate is `q`.
+The X-only drivers flip X with probability `p`, so thresholds on the `p` axis
+are not directly comparable with the existing X-only scans.
 
 ### 3.3 CNOT round (control C, target T)
 
@@ -115,8 +120,8 @@ it at the start of the next round (step 1), which gives the same sequence
 except for the trivial first round and the final cleanup.
 
 Gate-noise marginals per sector: flip C only, flip T only, and flip both each
-occur with probability `4p2/15` (= `8p/3` at `P2_RATIO=10`). The per-qubit
-X flip probability is `16p/3`.
+occur with probability `4p2/15` (= `4p/15` at `P2_RATIO=1`). The per-qubit
+X flip probability is `8p2/15`.
 
 Difference from all current drivers: there, noise after the gate is post-gate.
 Here each gate adds one round, and that round's data noise comes before the
@@ -333,7 +338,7 @@ with `Z` (Section 12).
    - Z on every edge crossed by a dual cycle gives no syndrome and a Z-sector
      failure.
 3. Samplers (at least 10^6 draws):
-   - single-qubit: `P(x) = P(z) = 2p/3` and `P(x and z) = p/3`;
+   - single-qubit: `P(x) = P(z) = 2p1/3` and `P(x and z) = p1/3`;
    - two-qubit: all 15 Paulis equally likely and never `II`; per sector, the
      (C only, T only, both) probabilities are each `4p2/15`.
 4. Gate algebra and merge: the physical map matches Section 3.3 step 3. The X
@@ -489,5 +494,5 @@ Stage 2:
   above). At `L = 19`, `N = L` is not stationary for `k <= 1`, where the error
   per CNOT at `N = 2L` is 13-22% (`k = 0`) and 4-9% (`k = 1`) higher. For
   `k >= 2`, `N = L` and `2L` agree within about 4%.
-- Still open: `L > 19`, and the two-qubit noise ratio (`P2_RATIO = 10` makes
+- Still open: `L > 19`, and the two-qubit noise ratio (`p2 = 10 p1` makes
   gate noise 80% of A's data noise at `k = 1`).

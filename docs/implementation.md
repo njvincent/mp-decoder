@@ -1169,31 +1169,48 @@ frame snapshots, and scan scripts are implemented.
 
 #### 4.6.2 Noise model and round order
 
+Convention (since 2026-11-17): `p` is the two-qubit gate error rate. All rates
+are set from `PVAL = p`:
+
+| Channel | Total probability | Per Pauli |
+| --- | --- | --- |
+| two-qubit depolarizing after each CNOT | `p2 = P2_RATIO * p` (default `P2_RATIO = 1`: `p`) | `p2/15` |
+| single-qubit depolarizing, every round | `p1 = p/10` (fixed factor, `p1_of`) | `p1/3 = 0.1p/3` |
+| measurement flip, every syndrome bit | `q = QRAT * p` (default `QRAT = 1`: `p`, the two-qubit gate error rate) | - |
+
 One ordinary round of a live block:
 
 1. decode each sector: legacy steps 1-6 of Section 3.2.2 (`decode_step!`);
 2. single-qubit depolarizing: one uniform draw per edge `e`; X, Y, Z each
-   with probability `p/3`; `x[e] ^= (X or Y)` and `zdual[sigma(e)] ^= (Z or Y)`;
+   with probability `p1/3`; `x[e] ^= (X or Y)` and `zdual[sigma(e)] ^= (Z or Y)`;
 3. measure each sector: legacy steps 8-10 (`measure_and_insert!`), with
-   Bernoulli(`q`) flips on every syndrome bit and `q = QRAT * p`.
+   Bernoulli(`q`) flips on every syndrome bit.
 
-Per sector, the data flip rate is `2p/3` per round (X and Z flips correlated,
-`P(both) = p/3`) and the measurement flip rate is `q`. At the same `p`, the
-per-sector data rate is 2/3 of the X-only drivers' rate.
+Per sector, the data flip rate is `2p1/3 = p/15` per round (X and Z flips
+correlated, `P(both) = p1/3`) and the measurement flip rate is `q`. At the same
+`p`, the per-sector data rate is 1/15 of the X-only drivers' rate.
+
+Previous convention, used by every result in Sections 5.2.8-5.2.10
+(`results/cnot_primitive_xz/{stage1,hub,memory}/`): `p` was the single-qubit
+total (X, Y, Z each `p/3`), `q = QRAT * p = p`, and `p2 = P2_RATIO * p` with
+default `P2_RATIO = 10`. Such a point at `p_old` is the current convention at
+`p = 10 p_old`, `QRAT = 0.1`, and `P2_RATIO` divided by 10 (10 becomes 1).
+Current-convention scans write to `results/cnot_primitive_xz/p_2q/`.
 
 A CNOT round (control C, target T) runs steps 1 and 2 on both blocks, then:
 
 1. unless `GATE_MODE=idle`, the ideal transversal CNOT on the physical errors
    (`x_T ^= x_C`, `zdual_C ^= zdual_T`) and the decoder rule of Section 4.6.3;
 2. the two-qubit depolarizing channel: for each pair (`e` in C, `e` in T),
-   with probability `p2 = P2_RATIO * p` (default `10p`), one of the 15
-   non-identity two-qubit Paulis, drawn uniformly;
+   with probability `p2`, one of the 15 non-identity two-qubit Paulis, drawn
+   uniformly;
 3. step 3 on both blocks.
 
 The round's data noise comes before the gate and is copied by it. Gate-noise
 marginals per sector: C only, T only, and both each occur with probability
 `4 p2 / 15`. `GATE_MODE=idle` skips the gate and the decoder rule, and
-`P2_RATIO` controls the two-qubit channel independently.
+`P2_RATIO` controls the two-qubit channel independently (`P2_RATIO = 0`: no
+gate noise).
 
 #### 4.6.3 Mirrored primitive rule
 
@@ -1314,13 +1331,13 @@ nonnegative integer, default 1), `TRACK_FRAMES` (`auto`: on for `hub`), and
 `OUT_ADJ` (filename suffix, e.g. `_rep3`). `SYNCH=false` is rejected.
 
 Scan scripts (`jobs/` holds shell scripts only). Local runs call the driver directly with these variables, e.g.
-`SCHEDULE=hub GAP_ROUNDS=1 LVAL=9 PVAL=0.005 STOP_MODE=capped STOP_COUNT=hub ACC_ERRORS=1500 MAX_TRIALS=10000 OUTPUT_DIR=results/cnot_primitive_xz/hub/k_1/NL julia --threads=8 cnot_primitive_xz.jl`.
+`SCHEDULE=hub GAP_ROUNDS=1 LVAL=9 PVAL=0.005 STOP_MODE=capped STOP_COUNT=hub ACC_ERRORS=1500 MAX_TRIALS=10000 OUTPUT_DIR=results/cnot_primitive_xz/p_2q/hub/k_1/NL julia --threads=8 cnot_primitive_xz.jl`.
 
 | Script | Purpose |
 | --- | --- |
-| `jobs/cnot_primitive_xz_hub_full_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout: `GAP_ROUNDS` and `L_LIST` (lists, default `0 1 2 5 10` and `5 7 9 13 19`; each gap, and within it the sizes `L <= 13` and `L > 13`, is submitted as its own array with its own default grid, chunking, and time limit; `MAX_CONCURRENT` applies per array), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, and a fixed 10^5 trials per point (`STOP_MODE=trials`; `capped` with `ACC_ERRORS` and `STOP_COUNT` remains available). Each point's 10^5 trials are split into `NREPEATS` tasks (default 4 when every `L <= 13`, 8 otherwise; files `_rep<r>`, summed by the loader), each on 8 CPUs. Time limit per task: 3 h (`L <= 13`) or 8 h, scaled with the trials and threads per task if those are changed, at most 36 h; `SBATCH_TIMELIMIT` overrides. On RCC the slowest task (`k = 10`, `N = 2L`) took 59 min at `L = 13` and 2.3 h at `L = 19`, against estimates of 75 min and 3.1 h from local timings. Default `p` grids are centered on each gap's full-scan threshold, about 0.45-1.5 times it: `k = 0` 0.2-0.55%, `k = 1` 0.25-0.8%, `k = 2, 3` 0.3-0.9%, `k = 5, 10` 0.3-1.0%. Every fitted rate (target, control, target X and Z) has at least 4 grid points on each side of its threshold. The grids from `k = 2` up coincide below 0.85%, so rates compare at equal `p`. Other `k` need `P_LIST`. To extend an existing scan, pass only the new points in `P_LIST`, because resubmitting a default grid reruns every point; e.g. `L_LIST=19 GAP_ROUNDS="0 1 2 5 10"` adds `L = 19` on the full grids. |
-| `jobs/cnot_primitive_xz_hub_initial_scan.sh` | Coarse initial scan that locates a new gap's threshold: for each gap in `GAPS` (default `2 5 10`) it submits `jobs/cnot_primitive_xz_hub_full_scan.sh` with `L = 5, 7, 9`, `N = L`, 12 values of `p` from 0.15% to 1.2%, and 1000 hub failures or 10^4 trials per point. Its jobs and logs are named `cnot_primitive_xz_hub_initial_scan`, with one point per task on 4 CPUs and a 30 min limit (set through `SBATCH_JOB_NAME`, `SBATCH_OUTPUT`, `SBATCH_ERROR`, `SBATCH_TIMELIMIT`); the slowest default point was estimated at about 8 min and took under 5 min on RCC. Results go to `results/cnot_primitive_xz/hub/k_<k>/NL/`; `hub_initial_scan_summary(root, k)` in `notebooks/analysis_utils.py` then gives A's failure probability per `(L, p)` and sector, the pairwise crossings of consecutive sizes (last + to - sign change), `p_c` from the largest pair, and a suggested `P_LIST` (0.5, 0.65, and 1.5 `p_c`, plus steps of about 7.5% of `p_c` over 0.8-1.25 `p_c`) as a ready scan command. On the existing data it gives 0.349% (`k = 0`), 0.521% (`k = 1`, `L = 11/13`), and 0.540% (`k = 3`). |
-| `jobs/cnot_primitive_xz_memory_full_scan.sh` | Memory reference under the same noise model: Slurm array over `(repeat, L, p, T)` with `SCHEDULE=memory`, `T = c d` (`T_MULTIPLES`, default `1 2`), `L = 5-13`, 13 values of `p` (0.9%, 1.2%, 1.4-2.3% in 0.1% steps, 2.7%, around the Stage-1 estimate of 1.77%), and a fixed 10^5 trials per point, one task per point on 4 CPUs; time limit 1 h (`L <= 13`) or 3 h, scaled like the hub full scan (the slowest point was estimated at about 22 min at `L = 13`, 80 min at `L = 19`; on RCC the `L <= 13` tasks took at most 15 min). Writes `results/cnot_primitive_xz/memory/T<c>d/`. |
+| `jobs/cnot_primitive_xz_hub_full_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout (`OUTPUT_DIR`, default `results/cnot_primitive_xz/p_2q/hub`; `P2_RATIO = 1`): `GAP_ROUNDS` and `L_LIST` (lists, default `0 1 2 5 10` and `5 7 9 13 19`; each gap, and within it the sizes `L <= 13` and `L > 13`, is submitted as its own array with its own default grid, chunking, and time limit; `MAX_CONCURRENT` applies per array), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, and a fixed 10^5 trials per point (`STOP_MODE=trials`; `capped` with `ACC_ERRORS` and `STOP_COUNT` remains available). Each point's 10^5 trials are split into `NREPEATS` tasks (default 4 when every `L <= 13`, 8 otherwise; files `_rep<r>`, summed by the loader), each on 8 CPUs. Time limit per task: 3 h (`L <= 13`) or 8 h, scaled with the trials and threads per task if those are changed, at most 36 h; `SBATCH_TIMELIMIT` overrides. On RCC the slowest task (`k = 10`, `N = 2L`) took 59 min at `L = 13` and 2.3 h at `L = 19`, against estimates of 75 min and 3.1 h from local timings. Default `p` grids, from the previous convention and not yet re-centered for the current one, are centered on each gap's full-scan threshold, about 0.45-1.5 times it: `k = 0` 0.2-0.55%, `k = 1` 0.25-0.8%, `k = 2, 3` 0.3-0.9%, `k = 5, 10` 0.3-1.0%. Every fitted rate (target, control, target X and Z) has at least 4 grid points on each side of its threshold. The grids from `k = 2` up coincide below 0.85%, so rates compare at equal `p`. Other `k` need `P_LIST`. To extend an existing scan, pass only the new points in `P_LIST`, because resubmitting a default grid reruns every point; e.g. `L_LIST=19 GAP_ROUNDS="0 1 2 5 10"` adds `L = 19` on the full grids. |
+| `jobs/cnot_primitive_xz_hub_initial_scan.sh` | Coarse initial scan that locates a new gap's threshold: for each gap in `GAPS` (default `0 1 2 5 10`) it submits `jobs/cnot_primitive_xz_hub_full_scan.sh` with `L = 5, 7, 9`, `N = L`, 12 values of `p` from 0.6% to 3.5% (around a coarse local probe of the current convention: `k = 1` crosses at 1.6-1.8% for `L = 5, 7, 9`, memory at 2-3%), and 1000 hub failures or 10^4 trials per point. Its jobs and logs are named `cnot_primitive_xz_hub_initial_scan`, with one point per task on 4 CPUs and a 30 min limit (set through `SBATCH_JOB_NAME`, `SBATCH_OUTPUT`, `SBATCH_ERROR`, `SBATCH_TIMELIMIT`); the slowest default point was estimated at about 8 min and took under 5 min on RCC. Results go to `results/cnot_primitive_xz/p_2q/hub/k_<k>/NL/`; `hub_initial_scan_summary(root, k)` in `notebooks/analysis_utils.py` then gives A's failure probability per `(L, p)` and sector, the pairwise crossings of consecutive sizes (last + to - sign change), `p_c` from the largest pair, and a suggested `P_LIST` (0.5, 0.65, and 1.5 `p_c`, plus steps of about 7.5% of `p_c` over 0.8-1.25 `p_c`) as a ready scan command. On the existing (previous-convention) data it gives 0.349% (`k = 0`), 0.521% (`k = 1`, `L = 11/13`), and 0.540% (`k = 3`). |
+| `jobs/cnot_primitive_xz_memory_full_scan.sh` | Memory reference under the same noise model: Slurm array over `(repeat, L, p, T)` with `SCHEDULE=memory`, `T = c d` (`T_MULTIPLES`, default `1 2`), `L = 5-13`, 13 values of `p` (0.9%, 1.2%, 1.4-2.3% in 0.1% steps, 2.7%, around the Stage-1 estimate of 1.77% under the previous convention, not yet re-centered), and a fixed 10^5 trials per point, one task per point on 4 CPUs; time limit 1 h (`L <= 13`) or 3 h, scaled like the hub full scan (the slowest point was estimated at about 22 min at `L = 13`, 80 min at `L = 19`; on RCC the `L <= 13` tasks took at most 15 min). Writes `results/cnot_primitive_xz/p_2q/memory/T<c>d/`. |
 
 #### 4.6.7 Kernel and overhead
 
@@ -1490,6 +1507,9 @@ without introducing excess cleanup failures. Sheet-copy remains an
 algorithmic oracle rather than a matched physical model.
 
 #### 5.2.8 Two-sector depolarizing driver (Stage 1)
+
+Sections 5.2.8-5.2.10 use the previous noise convention of Section 4.6.2
+(`p` = single-qubit total, `q = p`, `p2 = 10p`).
 
 Data: `results/cnot_primitive_xz/stage1/`. Analysis:
 `notebooks/cnot_primitive_xz_stage1_analysis.ipynb`. Settings:
@@ -1947,9 +1967,10 @@ models and should not be compared as if both were physical-block counts.
 - Core decoder code is duplicated. Any behavioral fix must be reviewed
   deliberately across the serial baseline, threaded baseline, primitive,
   sheet-copy, snapshot, two-pass, Y-junction, two-sector, and block files.
-- The two-sector driver's `p` is the total depolarizing probability: its
-  per-sector data rate is `2p/3`. Its thresholds on the `p` axis are not
-  directly comparable with the X-only drivers.
+- The two-sector driver's `p` is the two-qubit gate error rate: its
+  per-sector data rate is `p/15` per round, plus gate noise. Its thresholds on
+  the `p` axis are not directly comparable with the X-only drivers, nor with
+  its own results under the previous convention (Section 4.6.2).
 - The two-sector decoders are independent. They do not use Y correlations or
   the cross-block correlations of two-qubit faults. Gate noise never touches
   measurements, and syndrome extraction is not simulated at circuit level.

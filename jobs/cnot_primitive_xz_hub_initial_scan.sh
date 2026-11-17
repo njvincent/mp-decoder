@@ -7,7 +7,7 @@ set -euo pipefail
 # For each gap in GAPS, submits jobs/cnot_primitive_xz_hub_full_scan.sh with
 # initial-scan settings: L = 5 7 9, N = L, a wide coarse p grid, and 1000 hub
 # failures or 10^4 trials per point. Results go to
-# results/cnot_primitive_xz/hub/k_<k>/NL/. The jobs get their own name, log
+# results/cnot_primitive_xz/p_2q/hub/k_<k>/NL/. The jobs get their own name, log
 # files, and time limit through sbatch's SBATCH_JOB_NAME, SBATCH_OUTPUT,
 # SBATCH_ERROR, and SBATCH_TIMELIMIT, which override the full-scan script's
 # #SBATCH lines.
@@ -25,10 +25,13 @@ set -euo pipefail
 # Afterwards, copy the results back and locate each threshold with
 # hub_initial_scan_summary in notebooks/analysis_utils.py; it prints the pairwise
 # crossings and the P_LIST for the full scan.
-# Thresholds already located (local initial scans): k = 0 ~0.35%, 1 ~0.53%, 3 ~0.55-0.6%.
+# Thresholds already located (local initial scans): k = 0 ~0.35%, 1 ~0.53%, 3 ~0.55-0.6%,
+# under the previous noise convention (p = single-qubit rate, p2 = 10p, q = p).
+# Current convention: a coarse local probe (L = 5, 7, 9, ~3000 trials per point)
+# put k = 1 at ~1.6-1.8% and memory at ~2-3%, so the default grid spans 0.6-3.5%.
 
-GAPS=${GAPS:-"2 5 10"}
-INITIAL_P_LIST=${P_LIST:-"0.0015 0.002 0.0025 0.003 0.0035 0.004 0.005 0.006 0.007 0.008 0.010 0.012"}
+GAPS=${GAPS:-"0 1 2 5 10"}
+INITIAL_P_LIST=${P_LIST:-"0.006 0.008 0.010 0.012 0.014 0.016 0.018 0.020 0.023 0.026 0.030 0.035"}
 INITIAL_L_LIST=${L_LIST:-"5 7 9"}
 
 export SBATCH_JOB_NAME=cnot_primitive_xz_hub_initial_scan

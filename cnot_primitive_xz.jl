@@ -4,11 +4,14 @@ cnot_primitive_xz.jl
 Two-sector (X and Z) toric-code simulator for the local windowed
 message-passing decoder, with
 
-- single-qubit depolarizing data noise (X, Y, Z each p/3) every round,
-- independent measurement flips (probability q) on every X-type and Z-type
+- noise rates in units of p, the two-qubit gate error rate:
+  two-qubit depolarizing noise after each CNOT, total p2 = P2_RATIO p
+  (default p), each non-identity Pauli p2/15; single-qubit depolarizing data
+  noise every round, total p1 = 0.1p (X, Y, Z each 0.1p/3); independent
+  measurement flips q = QRAT p (default p) on every X-type and Z-type
   syndrome bit,
 - noisy transversal CNOT rounds: data noise, ideal CNOT, two-qubit
-  depolarizing noise (total p2, each non-identity Pauli p2/15), measurement,
+  depolarizing noise, measurement,
 - the primitive CNOT decoder rule, mirrored per sector: the target's X decoder
   absorbs the control's X decoder; the control's Z decoder absorbs the
   target's Z decoder.
@@ -494,23 +497,24 @@ function apply_x_flip_noise!(sec::Sector, p, ctx::KernelContext, rng::AbstractRN
 end
 
 """
-    apply_single_qubit_depolarizing!(block, p, ctx, rng)
+    apply_single_qubit_depolarizing!(block, p1, ctx, rng)
 
-Each data qubit (edge e) independently suffers X, Y, or Z with probability p/3
-each: `x[e] ^= (X or Y)`, `zdual[sigma(e)] ^= (Z or Y)`.
+Each data qubit (edge e) independently suffers X, Y, or Z with probability
+p1/3 each (the driver uses p1 = 0.1p): `x[e] ^= (X or Y)`,
+`zdual[sigma(e)] ^= (Z or Y)`.
 """
-function apply_single_qubit_depolarizing!(b::LogicalBlock, p, ctx::KernelContext, rng::AbstractRNG)
-    p > 0 || return nothing
+function apply_single_qubit_depolarizing!(b::LogicalBlock, p1, ctx::KernelContext, rng::AbstractRNG)
+    p1 > 0 || return nothing
     L = ctx.L
     u = ctx.unif_edges
     rand!(rng, u)
     x = b.x.state.errors
     z = b.z.state.errors
-    p_x = p / 3
-    p_xy = 2p / 3
+    p_x = p1 / 3
+    p_xy = 2p1 / 3
     @inbounds for a in 1:2, j in 1:L, i in 1:L
         v = u[i, j, a]
-        v < p || continue
+        v < p1 || continue
         if v < p_x
             x[i, j, a] ⊻= true
         elseif v < p_xy
@@ -829,7 +833,7 @@ end
 # =============================================================================
 
 struct SimParams
-    p::Float64
+    p1::Float64            # single-qubit depolarizing total (0.1p)
     q::Float64
     p2::Float64
     gate_mode::Symbol      # :cnot or :idle
@@ -963,7 +967,7 @@ function run_trial!(cs::CompiledSchedule, pool::Vector{LogicalBlock}, params::Si
             decode_block!(pool[cs.slot[id]], ctx, rng)
         end
         for id in live
-            apply_single_qubit_depolarizing!(pool[cs.slot[id]], params.p, ctx, rng)
+            apply_single_qubit_depolarizing!(pool[cs.slot[id]], params.p1, ctx, rng)
         end
         for ev in cs.events_at[tau]
             cb = pool[cs.slot[ev.control]]
@@ -1044,9 +1048,9 @@ end
 Base.@kwdef struct XZConfig
     L::Int
     Z::Int
-    p::Float64
+    p::Float64                        # two-qubit gate error rate
     qrat::Float64 = 1.0
-    p2_ratio::Float64 = 10.0
+    p2_ratio::Float64 = 1.0
     r::Int = 3
     gate_mode::Symbol = :cnot
     rule::Symbol = :primitive
@@ -1062,6 +1066,7 @@ Base.@kwdef struct XZConfig
     verbose::Bool = false
 end
 
+p1_of(cfg::XZConfig) = cfg.p / 10
 q_of(cfg::XZConfig) = cfg.p * cfg.qrat
 p2_of(cfg::XZConfig) = cfg.p * cfg.p2_ratio
 
@@ -1095,7 +1100,7 @@ with their own `Xoshiro` stream derived from `cfg.seed`.
 function simulate(cfg::XZConfig)
     validate(cfg)
     cs = compile_schedule(cfg.schedule)
-    params = SimParams(cfg.p, q_of(cfg), p2_of(cfg), cfg.gate_mode, cfg.rule, cfg.cleanup_time)
+    params = SimParams(p1_of(cfg), q_of(cfg), p2_of(cfg), cfg.gate_mode, cfg.rule, cfg.cleanup_time)
     budget = cfg.stop_mode == "failures" ? cfg.acc_errors : cfg.max_trials
     workers = cfg.trial_parallel ? max(1, min(nthreads(), budget)) : 1
     fail_quota = split_quota(cfg.stop_mode == "trials" ? 0 : cfg.acc_errors, workers)
@@ -1192,6 +1197,7 @@ function params_record(cfg::XZConfig)
         "L" => cfg.L,
         "Z" => cfg.Z,
         "p" => cfg.p,
+        "p1" => p1_of(cfg),
         "q" => q_of(cfg),
         "qrat" => cfg.qrat,
         "p2" => p2_of(cfg),
@@ -1199,7 +1205,7 @@ function params_record(cfg::XZConfig)
         "r" => cfg.r,
         "GATE_MODE" => String(cfg.gate_mode),
         "CNOT_RULE" => String(cfg.rule),
-        "noise_model" => "single-qubit depolarizing p (X,Y,Z each p/3); measurement flips q; two-qubit depolarizing p2 after each CNOT",
+        "noise_model" => "p = two-qubit gate error rate: two-qubit depolarizing p2 = P2_RATIO p after each CNOT (each Pauli p2/15); single-qubit depolarizing p1 = 0.1p (X,Y,Z each p1/3); measurement flips q = QRAT p",
         "total_rounds" => s.last_round,
         "CLEANUP_TIME" => cfg.cleanup_time,
         "stop_mode" => cfg.stop_mode,
@@ -1298,7 +1304,7 @@ function config_from_env(env=ENV)
         L=L, Z=Z,
         p=parse(Float64, get(env, "PVAL", "0.01")),
         qrat=parse(Float64, get(env, "QRAT", "1")),
-        p2_ratio=parse(Float64, get(env, "P2_RATIO", "10")),
+        p2_ratio=parse(Float64, get(env, "P2_RATIO", "1")),
         r=parse(Int, get(env, "RVAL", "3")),
         gate_mode=Symbol(lowercase(strip(get(env, "GATE_MODE", "cnot")))),
         rule=Symbol(lowercase(strip(get(env, "CNOT_RULE", "primitive")))),
@@ -1318,7 +1324,7 @@ end
 function main()
     cfg = config_from_env()
     println("cnot_primitive_xz.jl: schedule=$(cfg.schedule.name), L=$(cfg.L), Z=$(cfg.Z), ",
-            "p=$(cfg.p), q=$(q_of(cfg)), p2=$(p2_of(cfg)), gate=$(cfg.gate_mode), ",
+            "p=$(cfg.p), p1=$(p1_of(cfg)), q=$(q_of(cfg)), p2=$(p2_of(cfg)), gate=$(cfg.gate_mode), ",
             "rounds=$(cfg.schedule.last_round), cleanup=$(cfg.cleanup_time), ",
             "stop=$(cfg.stop_mode) on $(cfg.stop_count) failures, threads=$(nthreads())")
     data = simulate(cfg)

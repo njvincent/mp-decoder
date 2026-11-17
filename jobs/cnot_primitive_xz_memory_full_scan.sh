@@ -23,7 +23,9 @@ set -euo pipefail
 # Defaults: T = d and 2d, L = 5-13, a fixed 10^5 trials per point. The p grid is
 # set around the Stage-1 threshold estimate (~1.77%): 0.1% steps over
 # 1.4-2.3% for the crossing, 0.9% and 1.2% for the suppression factor, 2.7%
-# above.
+# above. That estimate is from the previous noise convention (p = single-qubit
+# rate, q = p), so the grid is not yet re-centered for the current one
+# (single-qubit noise 0.1p, q = p).
 #
 # Task size, chosen to keep jobs small and short for backfill: 4 CPUs, one task
 # per point (NREPEATS splits a point's TOTAL_TRIALS = 10^5 into that many tasks).
@@ -59,7 +61,7 @@ THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-4}}
 SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
 PROJECT_DIR=${PROJECT_DIR:-${SUBMIT_DIR}}
 JULIA_SCRIPT=${JULIA_SCRIPT:-cnot_primitive_xz.jl}
-OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_primitive_xz/memory}
+OUTPUT_DIR=${OUTPUT_DIR:-results/cnot_primitive_xz/p_2q/memory}
 
 [[ "${PROJECT_DIR}" == /* ]] || PROJECT_DIR="${SUBMIT_DIR}/${PROJECT_DIR}"
 [[ "${JULIA_SCRIPT}" == /* ]] || JULIA_SCRIPT="${PROJECT_DIR}/${JULIA_SCRIPT}"

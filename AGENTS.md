@@ -75,7 +75,8 @@ sections and the existing implementation.
   - Single-gate history-preserving CNOT prototypes (X sector only).
 - `projects/mp-decoder/cnot_primitive_xz.jl`
   - Both error sectors per block, single-qubit depolarizing noise, measurement
-    noise, noisy CNOT rounds (two-qubit depolarizing, default `p2 = 10p`), and
+    noise, noisy CNOT rounds (two-qubit depolarizing; `p` is the two-qubit
+    gate error rate, single-qubit noise `0.1p`, `q = p`), and
     the primitive rule mirrored per sector. It has a schedule engine
     (`memory`, `consecutive`, `hub`), logical-frame snapshots for own-fault
     counts, and a non-allocating kernel that is bit-exact against legacy
