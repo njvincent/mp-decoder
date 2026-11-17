@@ -7,7 +7,7 @@ fixed gap `k` at every size and `N = c d` CNOTs. Its first local scan (`k = 1`,
 `N = L, 2L`, `results/cnot_primitive_xz/hub/k_1/`) is analyzed in
 `notebooks/cnot_primitive_xz_hub_analysis.ipynb`. Initial scans at
 `k = 0, 2, 3, 5, 10` (`L = 5-9`, `N = L`) located their thresholds, and the
-memory full scan gives the reference threshold (1.79%). The implementation is
+memory full scan gives the reference threshold (1.78%). The implementation is
 documented in `docs/implementation.md` Section 4.6, and the results in
 Sections 5.2.8-5.2.10.
 
@@ -306,12 +306,18 @@ Initial scans stop at 1000 failures of A (`STOP_COUNT=hub`) or 10^4 trials.
 
 Memory reference: the memory full scan (`jobs/cnot_primitive_xz_memory_full_scan.sh`,
 `T = d, 2d`, `L = 5-13`, 10^5 trials per point) gives the threshold of the
-same noise model without gates, 1.79% (`docs/implementation.md` Section
-5.2.10), and the per-round `Lambda`.
+same noise model without gates, 1.78% (fits over `L = 5, 7, 9, 13`;
+`docs/implementation.md` Section 5.2.10), and the per-round `Lambda`.
+
+Sizes: the analysis uses the project's standard sizes, `L = 5, 7, 9, 13, 19`
+(memory has no `L = 19`), in both the plots and the fits.
 
 Steady state: the working hypothesis was that A's buffer reaches steady state
-after about `ceil(Z/(k+1))` gates. At `k = 1`, `B` is 1 within errors over
-`N = L, 2L`, and the partners' own Z faults level off after 4-5 gates.
+after about `ceil(Z/(k+1))` gates. At `k = 1` and `L <= 13`, `B` is 1 within
+errors over `N = L, 2L`, and the partners' own Z faults level off after 4-5
+gates. The full scans refute the hypothesis: the warm-up grows at least in
+proportion to `L` (about 16 rounds, or 8 gates at `k = 1`, at `L = 19`), not
+with `Z` (Section 12).
 
 ## 9. Validation (`test/cnot_primitive_xz_runtests.jl`)
 
@@ -404,19 +410,17 @@ Stage 2:
    full scans of every gap) and `notebooks/cnot_primitive_xz_memory_analysis.ipynb`.
 9. Scans:
    - done (local): `k = 1`, `N = L, 2L`, `L = 5-13`, `p = 0.3-0.9%`;
-   - next, on the cluster: `k = 1` at 10^5 trials per point, with
-     `L = 15-19`, to test whether A's crossing (0.53%) moves toward its
-     X sector's (0.52%), and the memory full scan at the same sizes;
    - done: initial scans at `k = 0, 3` (local) and `k = 2, 5, 10` (RCC),
-     `L = 5, 7, 9`, `N = L`; the memory full scan (RCC);
-   - done (RCC): full scans at `k = 0, 1, 2, 5, 10` (`L = 5-13`, `N = L, 2L`,
-     10^5 trials per point; `docs/implementation.md` Section 5.2.9);
-   - planned at the time: the full scans at `k = 0, 2, 5, 10` (`L = 5-13`, `N = L, 2L`), the
-     default of `jobs/cnot_primitive_xz_hub_full_scan.sh` (`k = 2, 5, 10`
-     share one grid, 0.3-0.85%; `k = 1` and `3` can be run by setting
-     `GAP_ROUNDS`);
-     and the idle control (`GATE_MODE=idle`), which separates the merge from
-     the gate noise.
+     `L = 5, 7, 9`, `N = L`; the memory full scan (RCC, `L = 5-13`);
+   - done (RCC): full scans at `k = 0, 1, 2, 5, 10`, `N = L, 2L`, 10^5 trials
+     per point, first `L = 5-13` and then `L = 19` with the grids extended
+     upward (the defaults of `jobs/cnot_primitive_xz_hub_full_scan.sh`;
+     `docs/implementation.md` Section 5.2.9). The earlier `L = 11` points
+     are not used;
+   - open: the memory full scan at `L = 19`, which would show whether the
+     decoder alone also slows its suppression from `L = 13` to 19; and the
+     idle control (`GATE_MODE=idle`), which separates the merge from the gate
+     noise.
 10. Documentation: results in `docs/implementation.md` Sections 5.2.9-5.2.10.
 
 ## 12. Limitations and open questions
@@ -433,37 +437,57 @@ Stage 2:
   0.07%. The merge also doubles the failure probability of the absorbing
   sectors at fixed `p`. Smaller `k` stacks gate noise on A and is expected to
   push the crossing lower.
-- Stage-2 full scans (`docs/implementation.md` Section 5.2.9), `L = 5-13`:
-  A's threshold is 0.37% (`k = 0`), 0.54% (`k = 1`), 0.62% (`k = 2`), 0.68%
-  (`k = 5`), and 0.69-0.70% (`k = 10`), saturating near `k = 5` at about 0.39
-  of memory's 1.79%. The hub's Z history needs about 6-10 rounds (the buffer
-  depth) to settle after a gate, so gates closer than that cost more. The
-  target's X sector (merge) limits at every gap. Next: `L = 15-19` at `k = 2`
-  and 5, and the Y-junction rule.
+- Stage-2 full scans (`docs/implementation.md` Section 5.2.9), `L = 5, 7, 9,
+  13, 19`:
+  - A's threshold (fit over all five sizes) is 0.37% (`k = 0`), 0.53%
+    (`k = 1`), 0.61% (`k = 2`), 0.68% (`k = 5`), and 0.70% (`k = 10`),
+    0.21-0.40 of memory's 1.78%.
+  - The fit flattens for `k >= 5`, but the largest pair does not: the 13/19
+    crossings are 0.71% (`k = 5`) and 0.77% (`k = 10`). For `k >= 5` the
+    crossings rise with size from about 0.60% at 5/7, so the large-`L`
+    thresholds of sparse gates are not settled. For `k <= 2` the drift is
+    small, apart from `L = 9`.
+  - The hub's settling time after a gate grows at least in proportion to `L`
+    (about 16 rounds at `L = 19`), not with the buffer depth. At `L = 19` even
+    `k = 10` gates overlap partly. Inference: at fixed `k`, gates overlap once
+    `L` is large enough.
+  - The target's X sector limits the threshold at every gap.
+  - Open: whether a rule that settles in a time independent of `L` (for
+    instance the Y-junction, which collapses after `Z` rounds) avoids the
+    overlap.
 - First local Stage-2 result, `k = 1`,
   `N = L, 2L`:
   - A's fixed-aspect threshold is 0.533(5)% at `N = L` and 0.532(5)% at
     `N = 2L` (0.53-0.54% over fit choices), 0.30 of the memory threshold.
   - A's X sector crosses lowest (0.51-0.52%), so the asymptotic threshold may
-    be nearer 0.52%.
+    be nearer 0.52%. With `L = 19` the target crosses at 0.513% (13/19), but
+    its X sector also crosses lower (0.497%), so the two drift together
+    instead of converging.
   - `Lambda_A` = 1.59, 1.34, 1.19 at `p` = 0.4, 0.5, 0.6%; `Lambda_A = 1`
     near 0.83%, above the threshold because of the per-gate normalization
     (Section 8 item 3).
 - Initial scans at other gaps (`docs/implementation.md` Section 5.2.9, `L = 5-9`):
   A's threshold is about 0.35% at `k = 0` and 0.50-0.52% at `k = 1`, then
-  levels off at 0.54-0.66% for `k = 2-10`, about a third of memory's 1.79%.
-  The error per CNOT also levels off from `k = 2` on. Inference: the gate
-  (two-qubit noise and merge) sets A's error, so sparser gates help little.
-  The 7/9 crossings are probably biased low by the `L = 9` anomaly.
-- Memory full scan (`docs/implementation.md` Section 5.2.10): threshold 1.79%;
-  `L = 9` fails 4-11% more than its neighbours' geometric mean, a decoder size
-  effect of unknown cause.
-- `Lambda` comes from `L = 5-13` only. Lake's gerrymandering theorem implies
-  suppression slower than `(L+1)/2` asymptotically for this decoder.
+  levels off at 0.54-0.66% for `k = 2-10`, about a third of memory's 1.78%.
+  The error per CNOT also levels off from `k = 2` on. Inference at the time:
+  the gate (two-qubit noise and merge) sets A's error, so sparser gates help
+  little. The full scans refute this at larger `L`, where the settling time
+  exceeds the gap. The 7/9 crossings are probably biased low by the `L = 9`
+  anomaly.
+- Memory full scan (`docs/implementation.md` Section 5.2.10): threshold 1.78%;
+  `L = 9` fails 5-8% more than the interpolation between `L = 7` and 13, a
+  decoder size effect of unknown cause.
+- Lake's gerrymandering theorem implies suppression slower than `(L+1)/2`
+  asymptotically for this decoder. The data are consistent with it but too
+  small to test it. The hub's `Lambda` from `L = 13` to 19 is below its fit
+  over `L = 5, 7, 9, 13` at every gap. Memory's pairwise `Lambda` drops from
+  `L = 5-7` to 7-9 and then levels off up to 13.
 - Next stage (Y-junction): with `k < Z`, a new gate reaches A before the
   previous junction collapses (`Z` rounds), so the hub needs overlapping
   junctions on one target. That is a design problem for that stage's plan.
-- At `k = 1` A is stationary after a warm-up of 4-5 gates (Section 8,
-  steady state). A longer circuit (`N = 4L`) is not needed for stationarity.
-- Still open: `L >= 15`, the other gaps `k`, and the two-qubit noise ratio
-  (`P2_RATIO = 10` makes gate noise 80% of A's data noise at `k = 1`).
+- Steady state (Section 8): the warm-up grows with `L` (the settling time
+  above). At `L = 19`, `N = L` is not stationary for `k <= 1`, where the error
+  per CNOT at `N = 2L` is 13-22% (`k = 0`) and 4-9% (`k = 1`) higher. For
+  `k >= 2`, `N = L` and `2L` agree within about 4%.
+- Still open: `L > 19`, and the two-qubit noise ratio (`P2_RATIO = 10` makes
+  gate noise 80% of A's data noise at `k = 1`).

@@ -1318,9 +1318,9 @@ Scan scripts (`jobs/` holds shell scripts only). Local runs call the driver dire
 
 | Script | Purpose |
 | --- | --- |
-| `jobs/cnot_primitive_xz_hub_full_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout: `GAP_ROUNDS` and `L_LIST` (lists, default `0 1 2 5 10` and `5 7 9 13 19`; each gap, and within it the sizes `L <= 13` and `L > 13`, is submitted as its own array with its own default grid, chunking, and time limit; `MAX_CONCURRENT` applies per array), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, and a fixed 10^5 trials per point (`STOP_MODE=trials`; `capped` with `ACC_ERRORS` and `STOP_COUNT` remains available). Each point's 10^5 trials are split into `NREPEATS` tasks (default 4 when every `L <= 13`, 8 otherwise; files `_rep<r>`, summed by the loader), each on 8 CPUs. Time limit per task: 3 h (`L <= 13`) or 8 h, scaled with the trials and threads per task if those are changed, at most 36 h; `SBATCH_TIMELIMIT` overrides. The slowest task (`N = 2L`) is estimated at about 75 min at `L = 13` and 3.1 h at `L = 19`, from local timings with cluster cores assumed up to 2x slower. Default `p` grids are centered on each gap's full-scan threshold, about 0.45-1.5 times it: `k = 0` 0.2-0.55%, `k = 1` 0.25-0.8%, `k = 2, 3` 0.3-0.9%, `k = 5, 10` 0.3-1.0%. Every fitted rate (target, control, target X and Z) has at least 4 grid points on each side of its threshold. The grids from `k = 2` up coincide below 0.85%, so rates compare at equal `p`. Other `k` need `P_LIST`. To extend an existing scan, pass only the new points in `P_LIST`, because resubmitting a default grid reruns every point; e.g. `L_LIST=19 GAP_ROUNDS="0 1 2 5 10"` adds `L = 19` on the full grids. Not yet run on Slurm. |
+| `jobs/cnot_primitive_xz_hub_full_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout: `GAP_ROUNDS` and `L_LIST` (lists, default `0 1 2 5 10` and `5 7 9 13 19`; each gap, and within it the sizes `L <= 13` and `L > 13`, is submitted as its own array with its own default grid, chunking, and time limit; `MAX_CONCURRENT` applies per array), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, and a fixed 10^5 trials per point (`STOP_MODE=trials`; `capped` with `ACC_ERRORS` and `STOP_COUNT` remains available). Each point's 10^5 trials are split into `NREPEATS` tasks (default 4 when every `L <= 13`, 8 otherwise; files `_rep<r>`, summed by the loader), each on 8 CPUs. Time limit per task: 3 h (`L <= 13`) or 8 h, scaled with the trials and threads per task if those are changed, at most 36 h; `SBATCH_TIMELIMIT` overrides. On RCC the slowest task (`k = 10`, `N = 2L`) took 59 min at `L = 13` and 2.3 h at `L = 19`, against estimates of 75 min and 3.1 h from local timings. Default `p` grids are centered on each gap's full-scan threshold, about 0.45-1.5 times it: `k = 0` 0.2-0.55%, `k = 1` 0.25-0.8%, `k = 2, 3` 0.3-0.9%, `k = 5, 10` 0.3-1.0%. Every fitted rate (target, control, target X and Z) has at least 4 grid points on each side of its threshold. The grids from `k = 2` up coincide below 0.85%, so rates compare at equal `p`. Other `k` need `P_LIST`. To extend an existing scan, pass only the new points in `P_LIST`, because resubmitting a default grid reruns every point; e.g. `L_LIST=19 GAP_ROUNDS="0 1 2 5 10"` adds `L = 19` on the full grids. |
 | `jobs/cnot_primitive_xz_hub_initial_scan.sh` | Coarse initial scan that locates a new gap's threshold: for each gap in `GAPS` (default `2 5 10`) it submits `jobs/cnot_primitive_xz_hub_full_scan.sh` with `L = 5, 7, 9`, `N = L`, 12 values of `p` from 0.15% to 1.2%, and 1000 hub failures or 10^4 trials per point. Its jobs and logs are named `cnot_primitive_xz_hub_initial_scan`, with one point per task on 4 CPUs and a 30 min limit (set through `SBATCH_JOB_NAME`, `SBATCH_OUTPUT`, `SBATCH_ERROR`, `SBATCH_TIMELIMIT`); the slowest default point was estimated at about 8 min and took under 5 min on RCC. Results go to `results/cnot_primitive_xz/hub/k_<k>/NL/`; `hub_initial_scan_summary(root, k)` in `notebooks/analysis_utils.py` then gives A's failure probability per `(L, p)` and sector, the pairwise crossings of consecutive sizes (last + to - sign change), `p_c` from the largest pair, and a suggested `P_LIST` (0.5, 0.65, and 1.5 `p_c`, plus steps of about 7.5% of `p_c` over 0.8-1.25 `p_c`) as a ready scan command. On the existing data it gives 0.349% (`k = 0`), 0.521% (`k = 1`, `L = 11/13`), and 0.540% (`k = 3`). |
-| `jobs/cnot_primitive_xz_memory_full_scan.sh` | Memory reference under the same noise model: Slurm array over `(repeat, L, p, T)` with `SCHEDULE=memory`, `T = c d` (`T_MULTIPLES`, default `1 2`), `L = 5-13`, 13 values of `p` (0.9%, 1.2%, 1.4-2.3% in 0.1% steps, 2.7%, around the Stage-1 estimate of 1.77%), and a fixed 10^5 trials per point, one task per point on 4 CPUs; time limit 1 h (`L <= 13`) or 3 h, scaled like the hub full scan (the slowest point was estimated at about 22 min at `L = 13`, 80 min at `L = 19`; on RCC the `L <= 13` tasks took at most 15 min). Writes `results/cnot_primitive_xz/memory/T<c>d/`. Not yet run on Slurm. |
+| `jobs/cnot_primitive_xz_memory_full_scan.sh` | Memory reference under the same noise model: Slurm array over `(repeat, L, p, T)` with `SCHEDULE=memory`, `T = c d` (`T_MULTIPLES`, default `1 2`), `L = 5-13`, 13 values of `p` (0.9%, 1.2%, 1.4-2.3% in 0.1% steps, 2.7%, around the Stage-1 estimate of 1.77%), and a fixed 10^5 trials per point, one task per point on 4 CPUs; time limit 1 h (`L <= 13`) or 3 h, scaled like the hub full scan (the slowest point was estimated at about 22 min at `L = 13`, 80 min at `L = 19`; on RCC the `L <= 13` tasks took at most 15 min). Writes `results/cnot_primitive_xz/memory/T<c>d/`. |
 
 #### 4.6.7 Kernel and overhead
 
@@ -1540,49 +1540,88 @@ normalization.
 
 #### 5.2.9 Hub circuit at fixed gate density (Stage 2)
 
-Full scans (RCC): `k = 0, 1, 2, 5, 10`, `L = 5-13`, `N = L` and `2L`, a fixed
-10^5 trials per point (`_trials25000_rep<r>` files in
-`results/cnot_primitive_xz/hub/k_<k>/{NL,N2L}/`; at most 1 h per task on 8
-CPUs). Analysis: the Full scan section of
-`notebooks/cnot_primitive_xz_hub_analysis.ipynb`. Main fits are degree 2 over
-`L = 7, 11, 13` (without the anomalous `L = 9`) and the five grid values of `p`
-nearest the 11/13 crossing. The systematic spread over crossings and fit
-choices is about 0.01-0.03%.
+Full scans (RCC): `k = 0, 1, 2, 5, 10`, `L = 5, 7, 9, 13, 19`, `N = L` and
+`2L`, a fixed 10^5 trials per point in
+`results/cnot_primitive_xz/hub/k_<k>/{NL,N2L}/`. Each point is 4 files
+(`_trials25000_rep<r>`) at `L <= 13` and 8 files (`_trials12500_rep<r>`) at
+`L = 19`. The slowest task (`k = 10`, `N = 2L`, 8 CPUs) took 59 min at `L = 13`
+and 2.3 h at `L = 19`. An earlier `L = 11` run, made before the grids were
+extended upward, is not used. Analysis: the Full scan section of
+`notebooks/cnot_primitive_xz_hub_analysis.ipynb`.
+
+Fits are degree 2 over all five sizes and the five grid values of `p` nearest
+the 13/19 crossing. Fit errors are at most 0.001%, so the drift of the
+crossings with size dominates the uncertainty.
 
 ~~~text
-k      target, N = L / 2L    target X / Z     control (any partner)   target / memory
-0      0.374 / 0.367%        0.357 / 0.412%   0.402%                  0.21
-1      0.537 / 0.530%        0.517 / 0.586%   0.566%                  0.30
-2      0.618 / 0.618%        0.598 / 0.672%   0.625%                  0.35
-5      0.685 / 0.681%        0.664 / 0.733%   0.668%                  0.38
-10     0.690 / 0.698%        0.674 / 0.742%   0.676%                  0.39
+k    target, N = L / 2L   target X / Z     control, 13/19   target / memory   target crossings 5/7, 7/9, 9/13, 13/19
+0    0.366 / 0.361%       0.352 / 0.406%   0.403%           0.21              0.357, 0.348, 0.383, 0.360%
+1    0.528 / 0.529%       0.508 / 0.574%   0.581%           0.30              0.526, 0.519, 0.549, 0.513%
+2    0.610 / 0.609%       0.588 / 0.661%   0.665%           0.34              0.579, 0.605, 0.634, 0.601%
+5    0.679 / 0.679%       0.658 / 0.731%   0.735%           0.38              0.604, 0.620, 0.723, 0.707%
+10   0.704 / 0.716%       0.681 / 0.758%   0.773%           0.40              0.603, 0.623, 0.737, 0.768%
 ~~~
 
-- The threshold rises with the gap and saturates near `k = 5`. The initial
-  scans' plateau (0.55-0.65% at `L <= 9`) was low. For `k >= 2` the crossings
-  drift upward with `L` (`k = 5`: 0.60% at 5/7, 0.70% at 11/13).
-- Error per CNOT at `p = 0.4%`, `L = 13`: 0.0149, 0.0034, 0.0022, 0.0019,
-  0.0019 for `k = 0, 1, 2, 5, 10`; `Lambda` at 0.4%: 1.19, 1.61, 1.80, 1.87,
-  1.88.
-- After each gate the hub's Z history takes about 6-10 rounds to settle,
-  comparable to the buffer depth (`Z = 4-7`).
-  - The partners' own Z faults rise over the first ~10 gates at `k = 0`, 4-5
-    at `k = 1`, and 2 at `k = 2`, and are flat for `k >= 5`.
-  - At `k = 0` the hub is not in steady state within `N = L` (the error per
-    CNOT is 4-8% higher at `N = 2L`); for `k >= 1` the ratio is 0.97-1.00.
-  - Inference: gates closer than the buffer depth merge onto unfinished
-    history, which is what raises their error.
-- The target's X sector, which absorbs the partners' X histories, crosses
-  0.06-0.07% below Z at every gap.
+- The fitted threshold rises with the gap and flattens for `k >= 5`: `k = 10`
+  is 0.025% above `k = 5`. The largest pair does not flatten: at 13/19,
+  `k = 10` crosses 0.06% above `k = 5`.
+- The crossings move with size.
+  - For `k <= 2` the drift is small. `L = 9` is out of line: its excess
+    failures lower its crossing with 7 and raise its crossing with 13.
+  - For `k >= 5` they rise from about 0.60% (5/7) to 0.71% (`k = 5`) and
+    0.77% (`k = 10`) at 13/19, so the fit lands between the small and the
+    large sizes. The large-`L` thresholds of sparse gates are not settled.
+  - `chi2/dof` (20 degrees of freedom) is 9-270 for the target at `N = L`,
+    13-180 at `N = 2L`, and 17-740 for the control. It reflects this drift,
+    not statistics, so the control is quoted by its crossing.
+  - The control's crossing is at or above the target's.
+- Error per CNOT at `p = 0.4%`, `L = 19`: 0.0128, 0.00126, 0.00059, 0.00038,
+  0.00033 for `k = 0, 1, 2, 5, 10`.
+  - `Lambda` at 0.4% falls from 1.19, 1.61, 1.79, 1.85, 1.86 (fit over
+    `L = 5, 7, 9, 13`) to 1.05, 1.39, 1.55, 1.70, 1.78 (13 to 19), most for
+    dense gates.
+  - Memory's pairwise `Lambda` drops from `L = 5-7` to 7-9 and then levels off
+    up to 13 (Section 5.2.10). Without memory at `L = 19`, the decoder's own
+    share of the slowdown from 13 to 19 cannot be separated.
+- The hub's settling time grows with `L`. The partners' own Z failures rise
+  from the first partner to a plateau as earlier gates disturb A. The table
+  below is at `N = 2L`, with profiles summed over `p`; each `p` alone gives the
+  same trend, below threshold as well.
+
+  ~~~text
+  first partner / plateau, rounds from the first gate to the first partner at 90% of it
+  k     L = 9       L = 13      L = 19
+  0     0.14, 6     0.05, 9     0.01, 16
+  1     0.49, 4     0.32, 8     0.14, 16
+  2     0.70, 3     0.53, 6     0.31, 15
+  5     0.93, 0     0.84, 6     0.61, 12
+  10    0.98, 0     0.97, 0     0.81, 11
+  ~~~
+
+  - Rounds come in steps of `k + 1`, and 0 means that the first partner is
+    already within 90% of the plateau.
+  - Where the gap resolves it (`k <= 2`), the time is similar across gaps and
+    grows at least in proportion to `L` (`k = 0`: 6, 9, 16 rounds). Over the
+    same sizes the buffer depth grows only from 6 to 8. This replaces the
+    earlier inference, made from `L <= 13`, that the settling time is the
+    buffer depth.
+  - At `L = 19` even `k = 10` gates overlap partly.
+  - Inference: at any fixed `k`, gates overlap once `L` is large enough. That
+    fits the falling crossings of dense gates, and suggests that the rise at
+    `k >= 5` may not last.
+- Steady state: below threshold at `L = 19`, the error per CNOT at `N = 2L`
+  exceeds `N = L` by 13-22% at `k = 0` and by 4-9% at `k = 1`.
+  - There, the warm-up (about 16 rounds) is most of the `N = L` gate sequence
+    at `k = 0` (18 rounds) and almost half of it at `k = 1` (36 rounds).
+  - For `k >= 2` the two agree within the statistical errors (about 4%).
+- The target's X sector, which receives the partners' X errors, has a
+  threshold 0.05-0.08% below Z at every gap. Memory's X and Z agree.
 - The average partner fails 1.6-2.9x more often than its own faults alone
   (`p = 0.4%`, `L = 13`), because it carries the hub's earlier Z errors.
-- `L = 9` exceeds its neighbours' geometric mean by 2-4% near threshold, and by
-  up to 20% at `p = 0.3%` and large `k`.
-- `chi2/dof` is 3-30 for `k >= 1` even without `L = 9`, a sign of finite-size
-  drift beyond the quadratic ansatz.
+- `L = 9` exceeds the log-linear interpolation between `L = 7` and 13 by 2-5%
+  near threshold, and by up to 14% at `p = 0.3%` and large `k`.
 
-The first `k = 1` scan below (local) is superseded by the RCC run; the two
-agree (0.533% against 0.537%).
+The first `k = 1` scan below (local, `L = 5-13`) is superseded by the RCC run.
 
 First local `k = 1` scan. Data: `results/cnot_primitive_xz/hub/k_1/{NL,N2L}/` (`_fail1500cap10000` files). Analysis (at the time):
 `notebooks/cnot_primitive_xz_hub_analysis.ipynb` (Full scan section), with the helpers
@@ -1619,14 +1658,16 @@ A, Z sector (source)        0.566(9)%      0.571(8)%      0.566-0.578%
 eps_A per gate              0.775(22)%                    0.762-0.775%
 ~~~
 
-- The threshold is 0.30 of the memory threshold (1.79%, Section 5.2.10).
+- The threshold is 0.30 of the memory threshold (1.78%, Section 5.2.10).
 - With `B ≈ 1`, `P_A(2L)` follows from `P_A(L)`, so `N = 2L` is an
   independent replica, not a test of the aspect ratio.
 - Pairwise crossings are 0.50-0.58%. `L = 9` does relatively worse at both
   aspect ratios; cleanup failures also concentrate there.
-- A's X sector crosses lowest. Inference: the either-sector crossing should
-  move toward it as `L` grows, so the asymptotic threshold may be nearer
-  0.52%. Testing this needs `L >= 15`.
+- A's X sector crosses lowest. Inference at the time: the either-sector
+  crossing should move toward it as `L` grows, so the asymptotic threshold may
+  be nearer 0.52%. The `L = 19` full scan does not support the mechanism: at
+  13/19 the target crosses at 0.513% and its X sector at 0.497%, so the two
+  still differ by about 0.02%.
 
 Per-gate rate:
 
@@ -1691,9 +1732,12 @@ Lambda_A, p = 0.4%        1.24        1.65        1.80        -           1.81  
   threshold (Section 5.2.10).
 - The error per CNOT also levels off from `k = 2` on: up to ten idle rounds per
   gate add nothing measurable.
-  - Inference: A's error is set by the gate itself (the `10p` two-qubit channel
-    and the primitive merge), not by the spacing of gates, so sparser gates do
-    not lift the fixed-aspect threshold above about 0.6%. The idle control
+  - Inference at the time: A's error is set by the gate itself (the `10p`
+    two-qubit channel and the primitive merge), not by the spacing of gates,
+    so sparser gates do not lift the fixed-aspect threshold above about 0.6%.
+    The full scans refute this. At 13/19 the target crosses at 0.77% for
+    `k = 10`, and at `L = 19` the error per CNOT at 0.4% falls by 44% from
+    `k = 2` to 10, because the settling time grows with `L` (above). The idle control
     (`GATE_MODE=idle`) would separate the merge from the gate noise.
 - `L = 9` runs worse than its neighbours (Section 5.2.10), so these 7/9
   crossings are probably biased low.
@@ -1707,29 +1751,34 @@ Data: `results/cnot_primitive_xz/memory/T1d/`, `T2d/`
 Settings:
 
 - one block, `T = d` and `2d`, `L = 5-13`, 13 values of `p` (0.9-2.7%), a
-  fixed 10^5 trials per point;
+  fixed 10^5 trials per point. The analysis uses `L = 5, 7, 9, 13`, the
+  project's standard sizes;
 - otherwise as the hub: `q = p`, `r = 3`, logarithmic `Z`, cleanup `2d`;
 - at most 9 min (`T = d`) and 15 min (`T = 2d`) per task on 4 CPUs.
 
 Results:
 
-- Threshold about 1.79%. The degree-2 fits over 1.6-2.0% without `L = 9` give
-  1.788(5)% at `T = d` and 1.788(3)% at `T = 2d` (`chi2/dof` 20/15 and 21/15).
-  - Crossings between sizes other than 9 span 1.74-1.82%.
-  - With `L = 9`, the fits give 1.77-1.79% but fail the goodness-of-fit test
-    (`chi2/dof` 6-15).
+- Threshold about 1.78%. The degree-2 fits over 1.6-2.0% and all four sizes
+  give 1.776(5)% at `T = d` and 1.776(4)% at `T = 2d`. They fail the
+  goodness-of-fit test (`chi2/dof` 160/15 and 239/15) because of `L = 9`.
+  - Without `L = 9` they give 1.784(5)% and 1.785(4)% (`chi2/dof` 13/10 and
+    11/10).
+  - Crossings between sizes other than 9 span 1.75-1.81%.
   - The Stage-1 estimate (1.77%) agrees, and so do the shared points (rms
-    `z` = 1.1).
-- `L = 9` fails 4-11% more often than the geometric mean of `L = 7` and 11 for
-  `p >= 1.2%` (28% at 0.9%). This lowers the 7/9 crossing to 1.61% and raises
-  the 9/11 crossing to 2.0%.
+    `z` = 1.2 over 24 points).
+- `L = 9` fails 5-8% more often than the log-linear interpolation between
+  `L = 7` and 13 for `p >= 1.4%` (14-17% at 0.9-1.2%). This shifts every
+  crossing that involves it.
   - It also has the most cleanup failures, but at about `10^-3` of trials they
     cannot explain the excess.
   - The legacy X-only driver shows the same `L = 9` cleanup excess. The cause
     is not identified.
-- Per round (decay over `T = d, 2d`): `Lambda` = 2.36 at 0.9%, 1.77 at 1.2%,
+- Per round (decay over `T = d, 2d`): `Lambda` = 2.32 at 0.9%, 1.77 at 1.2%,
   and 1.52 at 1.4%, reaching 1 near 2.6%. `B` = 1.00-1.14.
-- X and Z sector failures agree (rms `z` = 0.89).
+  - Between neighbouring sizes it drops from `L = 5-7` to 7-9 and then levels
+    off: at 1.2% it is 2.02, 1.67, and 1.68 for `L = 5-7, 7-9, 9-13`. The
+    `L = 9` excess lowers the 7-9 value and raises the 9-13 one.
+- X and Z sector failures agree (rms `z` = 1.0 over 104 points).
 
 ## 6. Validation and Operational Caveats
 
