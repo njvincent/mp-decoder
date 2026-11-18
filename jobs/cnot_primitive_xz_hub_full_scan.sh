@@ -5,7 +5,7 @@
 #SBATCH --time=03:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=8G
 #SBATCH --output=logs/cnot_primitive_xz_hub_full_scan_%A_%a.out
 #SBATCH --error=logs/cnot_primitive_xz_hub_full_scan_%A_%a.err
@@ -38,11 +38,14 @@ set -euo pipefail
 # add points to an existing scan, pass only the new ones in P_LIST:
 # resubmitting a default grid reruns every point.
 #
-# Task size, chosen to keep jobs small and short for backfill: 8 CPUs, and
-# NREPEATS = 4 when every L <= 13, 8 otherwise. The slowest point (N = 2L)
-# measured about 88 ms per trial at L = 13 and 450 ms at L = 19 on 8 threads of
-# the development machine; with cluster cores up to 2x slower, the slowest task
-# takes about 75 min (L = 13, 2.5e4 trials) and 3.1 h (L = 19, 1.25e4 trials).
+# Task size, chosen to keep jobs short for backfill and a gap under 1000 tasks:
+# 16 CPUs, and NREPEATS = 2 when every L <= 13, 4 otherwise, so a gap's default
+# grid is 400 + 200 = 600 tasks. All five default gaps together are 3000 tasks;
+# under a per-user job limit, submit them separately (GAP_ROUNDS=k). The
+# slowest point (N = 2L) measured about 88 ms per trial at L = 13 and 450 ms at
+# L = 19 on 8 threads of the development machine; with twice the threads and
+# trials per task and cluster cores up to 2x slower, the slowest task takes
+# about 75 min (L = 13, 5e4 trials) and 3.1 h (L = 19, 2.5e4 trials).
 # The time limit is 3 h when every L <= 13 and 8 h otherwise, scaled with the
 # trials and threads per task if those are changed (at most 36 h);
 # SBATCH_TIMELIMIT=hh:mm:ss overrides it.
@@ -56,7 +59,7 @@ set -euo pipefail
 # given) to every gap.
 #   GAP_ROUNDS=2 P_LIST="0.019 0.020 0.021 0.022" L_LIST="5 7 9" CNOT_COUNTS=L bash jobs/cnot_primitive_xz_hub_full_scan.sh
 
-NREPEATS=${1:-${NREPEATS:-auto}}   # tasks per point; auto: 4 if every L <= 13, else 8
+NREPEATS=${1:-${NREPEATS:-auto}}   # tasks per point; auto: 2 if every L <= 13, else 4
 MAX_CONCURRENT=${2:-${MAX_CONCURRENT:-30}}
 
 default_p_grid() {   # a gap's default p grid; empty if its threshold is not measured
@@ -98,7 +101,7 @@ fi
 P_LIST=(${P_LIST:-$(default_p_grid "${GAP_ROUNDS}")})
 L_LIST=("${L_ALL[@]}")
 MAX_L=$(printf '%s\n' "${L_LIST[@]}" | sort -n | tail -1)
-[[ "${NREPEATS}" == "auto" ]] && { if (( MAX_L <= 13 )); then NREPEATS=4; else NREPEATS=8; fi; }
+[[ "${NREPEATS}" == "auto" ]] && { if (( MAX_L <= 13 )); then NREPEATS=2; else NREPEATS=4; fi; }
 CNOT_COUNTS_NORMALIZED=${CNOT_COUNTS:-"L 2L"}
 CNOT_COUNTS_NORMALIZED=${CNOT_COUNTS_NORMALIZED//,/ }
 N_LIST=()
@@ -118,7 +121,7 @@ TOTAL_TRIALS=${TOTAL_TRIALS:-100000}   # per point, summed over its NREPEATS tas
 MAX_TRIALS=${MAX_TRIALS:-$(( (TOTAL_TRIALS + NREPEATS - 1) / NREPEATS ))}   # per task
 SEED_BASE=${SEED_BASE:-}
 JULIA_MODULE=${JULIA_MODULE:-julia}
-THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-8}}
+THREADS_PER_TASK=${THREADS_PER_TASK:-${SLURM_CPUS_PER_TASK:-16}}
 SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
 PROJECT_DIR=${PROJECT_DIR:-${SUBMIT_DIR}}
 JULIA_SCRIPT=${JULIA_SCRIPT:-cnot_primitive_xz.jl}
