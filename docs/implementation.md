@@ -1335,8 +1335,8 @@ Scan scripts (`jobs/` holds shell scripts only). Local runs call the driver dire
 
 | Script | Purpose |
 | --- | --- |
-| `jobs/cnot_primitive_xz_hub_full_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout (`OUTPUT_DIR`, default `results/cnot_primitive_xz/p_2q/hub`; `P2_RATIO = 1`): `GAP_ROUNDS` and `L_LIST` (lists, default `0 1 2 5 10` and `5 7 9 13 19`; each gap, and within it the sizes `L <= 13` and `L > 13`, is submitted as its own array with its own default grid, chunking, and time limit; `MAX_CONCURRENT` applies per array), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, and a fixed 10^5 trials per point (`STOP_MODE=trials`; `capped` with `ACC_ERRORS` and `STOP_COUNT` remains available). Each point's 10^5 trials are split into `NREPEATS` tasks (default 4 when every `L <= 13`, 8 otherwise; files `_rep<r>`, summed by the loader), each on 8 CPUs. Time limit per task: 3 h (`L <= 13`) or 8 h, scaled with the trials and threads per task if those are changed, at most 36 h; `SBATCH_TIMELIMIT` overrides. On RCC the slowest task (`k = 10`, `N = 2L`) took 59 min at `L = 13` and 2.3 h at `L = 19`, against estimates of 75 min and 3.1 h from local timings. Default `p` grids, from the previous convention and not yet re-centered for the current one, are centered on each gap's full-scan threshold, about 0.45-1.5 times it: `k = 0` 0.2-0.55%, `k = 1` 0.25-0.8%, `k = 2, 3` 0.3-0.9%, `k = 5, 10` 0.3-1.0%. Every fitted rate (target, control, target X and Z) has at least 4 grid points on each side of its threshold. The grids from `k = 2` up coincide below 0.85%, so rates compare at equal `p`. Other `k` need `P_LIST`. To extend an existing scan, pass only the new points in `P_LIST`, because resubmitting a default grid reruns every point; e.g. `L_LIST=19 GAP_ROUNDS="0 1 2 5 10"` adds `L = 19` on the full grids. |
-| `jobs/cnot_primitive_xz_hub_initial_scan.sh` | Coarse initial scan that locates a new gap's threshold: for each gap in `GAPS` (default `0 1 2 5 10`) it submits `jobs/cnot_primitive_xz_hub_full_scan.sh` with `L = 5, 7, 9`, `N = L`, 12 values of `p` from 0.6% to 3.5% (around a coarse local probe of the current convention: `k = 1` crosses at 1.6-1.8% for `L = 5, 7, 9`, memory at 2-3%), and 1000 hub failures or 10^4 trials per point. Its jobs and logs are named `cnot_primitive_xz_hub_initial_scan`, with one point per task on 4 CPUs and a 30 min limit (set through `SBATCH_JOB_NAME`, `SBATCH_OUTPUT`, `SBATCH_ERROR`, `SBATCH_TIMELIMIT`); the slowest default point was estimated at about 8 min and took under 5 min on RCC. Results go to `results/cnot_primitive_xz/p_2q/hub/k_<k>/NL/`; `hub_initial_scan_summary(root, k)` in `notebooks/analysis_utils.py` then gives A's failure probability per `(L, p)` and sector, the pairwise crossings of consecutive sizes (last + to - sign change), `p_c` from the largest pair, and a suggested `P_LIST` (0.5, 0.65, and 1.5 `p_c`, plus steps of about 7.5% of `p_c` over 0.8-1.25 `p_c`) as a ready scan command. On the existing (previous-convention) data it gives 0.349% (`k = 0`), 0.521% (`k = 1`, `L = 11/13`), and 0.540% (`k = 3`). |
+| `jobs/cnot_primitive_xz_hub_full_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout (`OUTPUT_DIR`, default `results/cnot_primitive_xz/p_2q/hub`; `P2_RATIO = 1`): `GAP_ROUNDS` and `L_LIST` (lists, default `0 1 2 5 10` and `5 7 9 13 19`; each gap, and within it the sizes `L <= 13` and `L > 13`, is submitted as its own array with its own default grid, chunking, and time limit; `MAX_CONCURRENT` applies per array), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, and a fixed 10^5 trials per point (`STOP_MODE=trials`; `capped` with `ACC_ERRORS` and `STOP_COUNT` remains available). Each point's 10^5 trials are split into `NREPEATS` tasks (default 4 when every `L <= 13`, 8 otherwise; files `_rep<r>`, summed by the loader), each on 8 CPUs. Time limit per task: 3 h (`L <= 13`) or 8 h, scaled with the trials and threads per task if those are changed, at most 36 h; `SBATCH_TIMELIMIT` overrides. On RCC the slowest task (`k = 10`, `N = 2L`) took 59 min at `L = 13` and 2.3 h at `L = 19`, against estimates of 75 min and 3.1 h from local timings. Default `p` grids are centered on each gap's threshold estimate `p_c`, the degree-2 fit to its current-convention initial scan (Section 5.2.11) rounded to 0.02%: 1.48, 1.84, 2.08, 2.26, 2.36% for `k = 0, 1, 2, 5, 10`. Each has 0.02% steps over `p_c ± 0.2%` plus `p_c ± 0.3%` and `± 0.5%` (25 values), so the target's fit region `p_c ± 0.1%` holds 5 points on each side, and at least 4 if the full-scan threshold lies within 0.14% of `p_c`. The X and Z sectors and the control fall mostly on the outer points, and grids of different gaps overlap only partly. Other `k` (including 3) need `P_LIST`. To extend an existing scan, pass only the new points in `P_LIST`, because resubmitting a default grid reruns every point; e.g. `L_LIST=19 GAP_ROUNDS="0 1 2 5 10"` adds `L = 19` on the full grids. |
+| `jobs/cnot_primitive_xz_hub_initial_scan.sh` | Coarse initial scan that locates a new gap's threshold: for each gap in `GAPS` (default `0 1 2 5 10`) it submits `jobs/cnot_primitive_xz_hub_full_scan.sh` with `L = 5, 7, 9`, `N = L`, 12 values of `p` from 0.6% to 3.5% (around a coarse local probe of the current convention: `k = 1` crosses at 1.6-1.8% for `L = 5, 7, 9`, memory at 2-3%), and 1000 hub failures or 10^4 trials per point. Its jobs and logs are named `cnot_primitive_xz_hub_initial_scan`, with one point per task on 4 CPUs and a 30 min limit (set through `SBATCH_JOB_NAME`, `SBATCH_OUTPUT`, `SBATCH_ERROR`, `SBATCH_TIMELIMIT`); the slowest default point was estimated at about 8 min and took under 5 min on RCC. Results go to `results/cnot_primitive_xz/p_2q/hub/k_<k>/NL/`; `hub_initial_scan_summary(root, k)` in `notebooks/analysis_utils.py` then gives A's failure probability per `(L, p)` and sector, the pairwise crossings of consecutive sizes (last + to - sign change), `p_c` from the largest pair, and a suggested `P_LIST` (0.5, 0.65, and 1.5 `p_c`, plus steps of about 7.5% of `p_c` over 0.8-1.25 `p_c`) as a ready scan command. On the existing (previous-convention) data it gives 0.349% (`k = 0`), 0.521% (`k = 1`, `L = 11/13`), and 0.540% (`k = 3`). Current-convention results: Section 5.2.11. |
 | `jobs/cnot_primitive_xz_memory_full_scan.sh` | Memory reference under the same noise model: Slurm array over `(repeat, L, p, T)` with `SCHEDULE=memory`, `T = c d` (`T_MULTIPLES`, default `1 2`), `L = 5-13`, 13 values of `p` (0.9%, 1.2%, 1.4-2.3% in 0.1% steps, 2.7%, around the Stage-1 estimate of 1.77% under the previous convention, not yet re-centered), and a fixed 10^5 trials per point, one task per point on 4 CPUs; time limit 1 h (`L <= 13`) or 3 h, scaled like the hub full scan (the slowest point was estimated at about 22 min at `L = 13`, 80 min at `L = 19`; on RCC the `L <= 13` tasks took at most 15 min). Writes `results/cnot_primitive_xz/p_2q/memory/T<c>d/`. |
 
 #### 4.6.7 Kernel and overhead
@@ -1799,6 +1799,48 @@ Results:
     off: at 1.2% it is 2.02, 1.67, and 1.68 for `L = 5-7, 7-9, 9-13`. The
     `L = 9` excess lowers the 7-9 value and raises the 9-13 one.
 - X and Z sector failures agree (rms `z` = 1.0 over 104 points).
+
+#### 5.2.11 Hub initial scan, current convention
+
+Current noise convention (Section 4.6.2): `p` is the two-qubit gate error
+rate, single-qubit noise `0.1p`, `q = p`. Data:
+`results/cnot_primitive_xz/p_2q/hub/k_<k>/NL/`
+(`jobs/cnot_primitive_xz_hub_initial_scan.sh`, RCC). Analysis: the "Initial
+scan, current convention" section of
+`notebooks/cnot_primitive_xz_hub_analysis.ipynb`.
+
+Settings: `k = 0, 1, 2, 5, 10`, `L = 5, 7, 9`, `N = L`, 12 values of `p`
+(0.6-3.5%), each point capped at 1000 hub failures or 10^4 trials (1162-10^4
+trials per point); otherwise as Section 5.2.9.
+
+Target pairwise crossings (%), with 68% intervals from resampling the binomial
+counts, and the control's crossings:
+
+~~~text
+k    target 5/7          target 7/9          target X 5/7, 7/9   target Z 5/7, 7/9   control 5/7, 7/9
+0    1.65 (1.62-1.68)    1.26 (1.22-1.30)    1.62, 1.24          2.12, 1.75          2.06, 1.39
+1    2.17 (2.06-2.31)    1.46 (1.37-1.82)    1.91, 1.29          2.39, 1.97          2.20, 1.58
+2    2.28 (2.20-2.39)    1.67 (1.63-1.71)    2.17, 1.56          2.76, 2.11          2.35, 1.70
+5    2.27 (2.22-2.40)    1.78 (1.73-2.00)    2.20, 1.74          2.91, 2.38          2.26, 1.73
+10   2.50 (2.42-2.61)    2.17 (2.07-2.34)    2.34, 2.07          2.58, 2.33          2.45, 1.84
+~~~
+
+- The threshold rises with the gap at both pairs and does not flatten by
+  `k = 10`.
+- The crossings fall by 0.3-0.7% from 5/7 to 7/9, beyond the statistical
+  spread at every gap; the previous convention's initial scans moved by at
+  most 0.08%. `L = 9`'s known excess (Section 5.2.10) biases 7/9 low; how much
+  of the drift it explains needs `L = 13, 19`.
+- The target's X sector crosses 0.5-0.7% below Z for `k <= 5` and about
+  0.25% below at `k = 10` (previous convention, full scan: 0.05-0.08%).
+- The control crosses above the target for `k <= 2`, with it at `k = 5`, and
+  below it at `k = 10`.
+- The memory reference has not been run under this convention.
+- The full-scan default grids (Section 4.6.6) are centered on degree-2 fits
+  over `L = 5, 7, 9` (window: grid values from 0.4% below the 7/9 crossing to
+  0.4% above the 5/7 crossing): 1.471(21), 1.846(28), 2.077(31), 2.253(40),
+  2.365(51)% for `k = 0, 1, 2, 5, 10`, with `chi2/dof` 31/7 to 85/13 from the
+  drift. They lie 0.2-0.4% above the 7/9 crossings.
 
 ## 6. Validation and Operational Caveats
 

@@ -14,6 +14,8 @@ Sections 5.2.8-5.2.10.
 Noise convention changed on 2026-11-17 (Section 1): `p` is now the two-qubit
 gate error rate, single-qubit noise is `0.1p`, and `q = p`. All results above
 use the previous convention (`p` = single-qubit rate, `p2 = 10p`, `q = p`).
+Under the current convention, the hub initial scans (`k = 0, 1, 2, 5, 10`,
+`L = 5-9`) are done: `docs/implementation.md` Section 5.2.11.
 
 Stage 1 adds both error sectors, depolarizing data noise, and noisy CNOT
 rounds. Stage 2 adds the hub circuit and the target's per-gate error rate,
