@@ -1335,7 +1335,7 @@ Scan scripts (`jobs/` holds shell scripts only). Local runs call the driver dire
 
 | Script | Purpose |
 | --- | --- |
-| `jobs/cnot_primitive_xz_hub_full_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout (`OUTPUT_DIR`, default `results/cnot_primitive_xz/p_2q/hub`; `P2_RATIO = 1`): `GAP_ROUNDS` and `L_LIST` (lists, default `0 1 2 5 10` and `5 7 9 13 19`; each gap, and within it the sizes `L <= 13` and `L > 13`, is submitted as its own array with its own default grid, chunking, and time limit; `MAX_CONCURRENT` applies per array), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, and a fixed 10^5 trials per point (`STOP_MODE=trials`; `capped` with `ACC_ERRORS` and `STOP_COUNT` remains available). Each point's 10^5 trials are split into `NREPEATS` tasks (default 2 when every `L <= 13`, 4 otherwise; files `_rep<r>`, summed by the loader), each on 16 CPUs, so a gap's default grid is 600 tasks (400 for `L <= 13`, 200 for `L = 19`) and all five gaps 3000; under a per-user job limit, submit gaps separately. (The previous-convention scan used 4 and 8 tasks of 8 CPUs.) Time limit per task: 3 h (`L <= 13`) or 8 h, scaled with the trials and threads per task if those are changed, at most 36 h; `SBATCH_TIMELIMIT` overrides. On RCC the slowest task (`k = 10`, `N = 2L`) took 59 min at `L = 13` and 2.3 h at `L = 19`, against estimates of 75 min and 3.1 h from local timings. Default `p` grids are centered on each gap's threshold estimate `p_c`, the degree-2 fit to its current-convention initial scan (Section 5.2.11) rounded to 0.02%: 1.48, 1.84, 2.08, 2.26, 2.36% for `k = 0, 1, 2, 5, 10`. Each has 0.02% steps over `p_c ± 0.2%` plus `p_c ± 0.3%` and `± 0.5%` (25 values), so the target's fit region `p_c ± 0.1%` holds 5 points on each side, and at least 4 if the full-scan threshold lies within 0.14% of `p_c`. The X and Z sectors and the control fall mostly on the outer points, and grids of different gaps overlap only partly. Other `k` (including 3) need `P_LIST`. To extend an existing scan, pass only the new points in `P_LIST`, because resubmitting a default grid reruns every point; e.g. `L_LIST=19 GAP_ROUNDS="0 1 2 5 10"` adds `L = 19` on the full grids. |
+| `jobs/cnot_primitive_xz_hub_full_scan.sh` | Slurm array over `(repeat, L, p, N)` for the cluster, same design and output layout (`OUTPUT_DIR`, default `results/cnot_primitive_xz/p_2q/hub`; `P2_RATIO = 1`): `GAP_ROUNDS` and `L_LIST` (lists, default `0 1 2 5 10` and `5 7 9 13 19`; each gap, and within it the sizes `L <= 13` and `L > 13`, is submitted as its own array with its own default grid, chunking, and time limit; `MAX_CONCURRENT` applies per array), `CNOT_COUNTS` as multiples of `d = L` (default `L 2L`), `d = L` always, `OUT_ADJ=_rep<r>` when repeating, and a fixed 10^5 trials per point (`STOP_MODE=trials`; `capped` with `ACC_ERRORS` and `STOP_COUNT` remains available). Each point's 10^5 trials are split into `NREPEATS` tasks (default 2 when every `L <= 13`, 4 otherwise; files `_rep<r>`, summed by the loader), each on 16 CPUs: 24 tasks per `p` value (16 for `L <= 13`, 8 for `L = 19`), so a gap's default grid is 696-912 tasks and all five gaps 4128; under a per-user job limit, submit gaps separately. (The previous-convention scan used 4 and 8 tasks of 8 CPUs.) Time limit per task: 3 h (`L <= 13`) or 8 h, scaled with the trials and threads per task if those are changed, at most 36 h; `SBATCH_TIMELIMIT` overrides. On RCC the slowest task (`k = 10`, `N = 2L`) took 59 min at `L = 13` and 2.3 h at `L = 19`, against estimates of 75 min and 3.1 h from local timings. Default `p` grids have two parts. First, 25 values around each gap's initial-scan estimate `c` (the degree-2 fit over `L = 5, 7, 9`, Section 5.2.11, rounded to 0.02%: 1.48, 1.84, 2.08, 2.26, 2.36% for `k = 0, 1, 2, 5, 10`): 0.02% steps over `c ± 0.2%` plus `c ± 0.3%` and `± 0.5%`. Second, a fill-in added after the full scan found the target's 13/19 crossing `x` at or below the lower edge of that band (Section 5.2.12): 0.02% steps over `x ± 0.14%`, with `x` from `N = L` and `2L` (4-13 values per gap, 47 in all), so the target's fit region `x ± 0.1%` holds 5 points on each side. That makes 29-38 values per gap. At `k <= 1` the Z sector and the control fall mostly on the outer points, and grids of different gaps overlap only partly. Other `k` (including 3) need `P_LIST`. To extend an existing scan, pass only the new points in `P_LIST`, because resubmitting a default grid reruns every point; e.g. `L_LIST=19 GAP_ROUNDS="0 1 2 5 10"` adds `L = 19` on the full grids. |
 | `jobs/cnot_primitive_xz_hub_initial_scan.sh` | Coarse initial scan that locates a new gap's threshold: for each gap in `GAPS` (default `0 1 2 5 10`) it submits `jobs/cnot_primitive_xz_hub_full_scan.sh` with `L = 5, 7, 9`, `N = L`, 12 values of `p` from 0.6% to 3.5% (around a coarse local probe of the current convention: `k = 1` crosses at 1.6-1.8% for `L = 5, 7, 9`, memory at 2-3%), and 1000 hub failures or 10^4 trials per point. Its jobs and logs are named `cnot_primitive_xz_hub_initial_scan`, with one point per task on 4 CPUs and a 30 min limit (set through `SBATCH_JOB_NAME`, `SBATCH_OUTPUT`, `SBATCH_ERROR`, `SBATCH_TIMELIMIT`); the slowest default point was estimated at about 8 min and took under 5 min on RCC. Results go to `results/cnot_primitive_xz/p_2q/hub/k_<k>/NL/`; `hub_initial_scan_summary(root, k)` in `notebooks/analysis_utils.py` then gives A's failure probability per `(L, p)` and sector, the pairwise crossings of consecutive sizes (last + to - sign change), `p_c` from the largest pair, and a suggested `P_LIST` (0.5, 0.65, and 1.5 `p_c`, plus steps of about 7.5% of `p_c` over 0.8-1.25 `p_c`) as a ready scan command. On the existing (previous-convention) data it gives 0.349% (`k = 0`), 0.521% (`k = 1`, `L = 11/13`), and 0.540% (`k = 3`). Current-convention results: Section 5.2.11. |
 | `jobs/cnot_primitive_xz_memory_full_scan.sh` | Memory reference under the same noise model: Slurm array over `(repeat, L, p, T)` with `SCHEDULE=memory`, `T = c d` (`T_MULTIPLES`, default `1 2`), `L = 5-13`, 13 values of `p` (0.9%, 1.2%, 1.4-2.3% in 0.1% steps, 2.7%, around the Stage-1 estimate of 1.77% under the previous convention, not yet re-centered), and a fixed 10^5 trials per point, one task per point on 4 CPUs; time limit 1 h (`L <= 13`) or 3 h, scaled like the hub full scan (the slowest point was estimated at about 22 min at `L = 13`, 80 min at `L = 19`; on RCC the `L <= 13` tasks took at most 15 min). Writes `results/cnot_primitive_xz/p_2q/memory/T<c>d/`. |
 
@@ -1840,7 +1840,58 @@ k    target 5/7          target 7/9          target X 5/7, 7/9   target Z 5/7, 7
   over `L = 5, 7, 9` (window: grid values from 0.4% below the 7/9 crossing to
   0.4% above the 5/7 crossing): 1.471(21), 1.846(28), 2.077(31), 2.253(40),
   2.365(51)% for `k = 0, 1, 2, 5, 10`, with `chi2/dof` 31/7 to 85/13 from the
-  drift. They lie 0.2-0.4% above the 7/9 crossings.
+  drift. They lie 0.2-0.4% above the 7/9 crossings. The full scan put the
+  thresholds near the 7/9 crossings instead (Section 5.2.12).
+
+#### 5.2.12 Hub full scan, current convention
+
+Data: `results/cnot_primitive_xz/p_2q/hub/k_<k>/{NL,N2L}/`
+(`jobs/cnot_primitive_xz_hub_full_scan.sh` on RCC, default grids of Section
+4.6.6). Analysis: the "Full scan, current convention" section of
+`notebooks/cnot_primitive_xz_hub_analysis.ipynb`.
+
+Settings: `k = 0, 1, 2, 5, 10`, `L = 5, 7, 9, 13, 19`, `N = L` and `2L`, 25
+values of `p` per gap, a fixed 10^5 trials per point (two tasks of 5 * 10^4
+for `L <= 13`, four of 2.5 * 10^4 for `L = 19`, 16 CPUs each). `k = 0` also
+holds 17 `L = 5` files of 2.5 * 10^4 trials from a cancelled first submission
+(the older 4-way split); the analysis leaves them out.
+
+Crossings (%; the 13/19 crossings have 68% intervals of ±0.01-0.02%), and the
+grid values within ±0.1% of the target's 13/19 crossing below / above it:
+
+~~~text
+k    target 13/19, N = L / 2L   target X / Z 13/19   control 13/19   target 5/7, 7/9, 9/13   fit region, N = L; 2L
+0    1.218 / 1.186              1.198 / 1.823        1.803           1.697, 1.291, 1.436     1/2; 1/1
+1    1.563 / 1.515              1.494 / 2.179        2.032           2.082, 1.642, 1.803     1/2; 0/1
+2    1.754 / 1.725              1.663 / 2.276        2.118           2.307, 1.710, 2.015     0/1; 0/1
+5    2.020 / 2.011              1.928 / 2.465        2.185           2.481, 1.915, 2.334     1/3; 1/3
+10   2.217 / 2.223              2.131 / 2.547        2.237           2.603, 1.970, 2.529     3/5; 4/5
+~~~
+
+- The threshold rises with the gap without flattening (+0.20% from `k = 5`
+  to 10).
+- The crossings fall with size: leaving out `L = 9`, by 0.39-0.55% from 5/7
+  to 13/19 (previous convention: -0.01 to +0.17%). The large-`L` threshold
+  is not settled.
+- The target's X sector crosses 0.42-0.69% below Z. The control crosses
+  above the target, by 0.58% at `k = 0` and 0.02% at `k = 10`.
+- The grids missed the fit region. The crossings lie 0.14-0.33% below the
+  grid centres and within 0.05-0.24% of the initial scans' 7/9 crossings, and
+  no gap has 4 grid values on each side within ±0.1%. The target threshold
+  fits are therefore not usable: the one that runs (`k = 10`, `N = 2L`) is
+  pinned at its window edge (2.32%). The control fits run at `k = 2, 5, 10`:
+  2.131, 2.211, 2.265% (`N = L`, `chi2/dof` = 106-139).
+- The default grids now include a 47-value fill-in at 0.02% steps over the
+  13/19 crossings ± 0.14% (Section 4.6.6); it has not been run yet.
+- `L = 9` fails 6-14% more often than the log-linear interpolation between
+  `L = 7` and 13.
+- Error per CNOT at each gap's lowest `p` (80-90% of its 13/19 crossing):
+  `Lambda` is 1.56-1.86 over `L = 5-13` and 1.24-1.34 from 13 to 19. At
+  `L = 19`, `N = 2L` exceeds `N = L` by 18% at `k = 0` and agrees within
+  about 5% for `k >= 1`.
+- Settling time (own Z, `N = 2L`, `L = 19`): 18, 18, 15, 12, 11 rounds for
+  `k = 0, 1, 2, 5, 10` (previous convention: 16, 16, 15, 12, 11).
+- The memory reference has not been run under this convention.
 
 ## 6. Validation and Operational Caveats
 

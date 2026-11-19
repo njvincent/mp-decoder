@@ -28,20 +28,22 @@ set -euo pipefail
 # N = L and 2L, a fixed 10^5 trials per point (STOP_MODE=trials),
 # split into NREPEATS tasks of MAX_TRIALS = 10^5 / NREPEATS each (independent
 # seeds, files _rep<r>; the analysis loader sums them).
-# Each default p grid is centered on the gap's threshold estimate p_c, the
-# degree-2 finite-size fit to its current-convention initial scan (L = 5, 7, 9;
-# docs/implementation.md Section 5.2.11) rounded to 0.02%: k = 0 1.48%,
-# k = 1 1.84%, k = 2 2.08%, k = 5 2.26%, k = 10 2.36%. Steps of 0.02% over
-# p_c +- 0.2%, plus p_c +- 0.3% and +- 0.5% (25 values): the fit region
-# p_c +- 0.1% holds 5 points on each side, and at least 4 remain if the
-# full-scan threshold lies within 0.14% of p_c. Any other k needs P_LIST. To
-# add points to an existing scan, pass only the new ones in P_LIST:
+# Each default p grid has two parts. First, 25 values around the gap's
+# initial-scan estimate c (degree-2 fit over L = 5, 7, 9, rounded to 0.02%:
+# k = 0 1.48%, k = 1 1.84%, k = 2 2.08%, k = 5 2.26%, k = 10 2.36%; Section
+# 5.2.11 of docs/implementation.md): 0.02% steps over c +- 0.2%, plus c +- 0.3%
+# and +- 0.5%. Second, the fill-in added after the full scan put the target's
+# 13/19 crossing x below that band (Section 5.2.12): 0.02% steps over
+# x +- 0.14%, with x from N = L and 2L, so the fit region x +- 0.1% holds 5
+# points on each side (29-38 values per gap in all). Any other k needs P_LIST.
+# To add points to an existing scan, pass only the new ones in P_LIST:
 # resubmitting a default grid reruns every point.
 #
 # Task size, chosen to keep jobs short for backfill and a gap under 1000 tasks:
-# 16 CPUs, and NREPEATS = 2 when every L <= 13, 4 otherwise, so a gap's default
-# grid is 400 + 200 = 600 tasks. All five default gaps together are 3000 tasks;
-# under a per-user job limit, submit them separately (GAP_ROUNDS=k). The
+# 16 CPUs, and NREPEATS = 2 when every L <= 13, 4 otherwise: 24 tasks per p
+# value (16 for L <= 13, 8 for L = 19), so a gap's default grid is 696-912
+# tasks. All five default gaps together are 4128 tasks; under a per-user job
+# limit, submit them separately (GAP_ROUNDS=k). The
 # slowest point (N = 2L) measured about 88 ms per trial at L = 13 and 450 ms at
 # L = 19 on 8 threads of the development machine; with twice the threads and
 # trials per task and cluster cores up to 2x slower, the slowest task takes
@@ -64,11 +66,11 @@ MAX_CONCURRENT=${2:-${MAX_CONCURRENT:-30}}
 
 default_p_grid() {   # a gap's default p grid; empty if its threshold is not measured
     case "$1" in
-        0) echo "0.0098 0.0118 0.0128 0.013 0.0132 0.0134 0.0136 0.0138 0.014 0.0142 0.0144 0.0146 0.0148 0.015 0.0152 0.0154 0.0156 0.0158 0.016 0.0162 0.0164 0.0166 0.0168 0.0178 0.0198" ;;
-        1) echo "0.0134 0.0154 0.0164 0.0166 0.0168 0.017 0.0172 0.0174 0.0176 0.0178 0.018 0.0182 0.0184 0.0186 0.0188 0.019 0.0192 0.0194 0.0196 0.0198 0.02 0.0202 0.0204 0.0214 0.0234" ;;
-        2) echo "0.0158 0.0178 0.0188 0.019 0.0192 0.0194 0.0196 0.0198 0.02 0.0202 0.0204 0.0206 0.0208 0.021 0.0212 0.0214 0.0216 0.0218 0.022 0.0222 0.0224 0.0226 0.0228 0.0238 0.0258" ;;
-        5) echo "0.0176 0.0196 0.0206 0.0208 0.021 0.0212 0.0214 0.0216 0.0218 0.022 0.0222 0.0224 0.0226 0.0228 0.023 0.0232 0.0234 0.0236 0.0238 0.024 0.0242 0.0244 0.0246 0.0256 0.0276" ;;
-        10) echo "0.0186 0.0206 0.0216 0.0218 0.022 0.0222 0.0224 0.0226 0.0228 0.023 0.0232 0.0234 0.0236 0.0238 0.024 0.0242 0.0244 0.0246 0.0248 0.025 0.0252 0.0254 0.0256 0.0266 0.0286" ;;
+        0) echo "0.0098 0.0106 0.0108 0.011 0.0112 0.0114 0.0116 0.0118 0.012 0.0122 0.0124 0.0126 0.0128 0.013 0.0132 0.0134 0.0136 0.0138 0.014 0.0142 0.0144 0.0146 0.0148 0.015 0.0152 0.0154 0.0156 0.0158 0.016 0.0162 0.0164 0.0166 0.0168 0.0178 0.0198" ;;
+        1) echo "0.0134 0.0138 0.014 0.0142 0.0144 0.0146 0.0148 0.015 0.0152 0.0154 0.0156 0.0158 0.016 0.0162 0.0164 0.0166 0.0168 0.017 0.0172 0.0174 0.0176 0.0178 0.018 0.0182 0.0184 0.0186 0.0188 0.019 0.0192 0.0194 0.0196 0.0198 0.02 0.0202 0.0204 0.0214 0.0234" ;;
+        2) echo "0.0158 0.016 0.0162 0.0164 0.0166 0.0168 0.017 0.0172 0.0174 0.0176 0.0178 0.018 0.0182 0.0184 0.0186 0.0188 0.019 0.0192 0.0194 0.0196 0.0198 0.02 0.0202 0.0204 0.0206 0.0208 0.021 0.0212 0.0214 0.0216 0.0218 0.022 0.0222 0.0224 0.0226 0.0228 0.0238 0.0258" ;;
+        5) echo "0.0176 0.0188 0.019 0.0192 0.0194 0.0196 0.0198 0.02 0.0202 0.0204 0.0206 0.0208 0.021 0.0212 0.0214 0.0216 0.0218 0.022 0.0222 0.0224 0.0226 0.0228 0.023 0.0232 0.0234 0.0236 0.0238 0.024 0.0242 0.0244 0.0246 0.0256 0.0276" ;;
+        10) echo "0.0186 0.0206 0.0208 0.021 0.0212 0.0214 0.0216 0.0218 0.022 0.0222 0.0224 0.0226 0.0228 0.023 0.0232 0.0234 0.0236 0.0238 0.024 0.0242 0.0244 0.0246 0.0248 0.025 0.0252 0.0254 0.0256 0.0266 0.0286" ;;
     esac
 }
 
